@@ -1,0 +1,3218 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>トイレ防衛隊: 清潔圏崩壊（半分手動版）</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0; padding: 0; height: 100%;
+        background: #1a1014; color: #eee;
+        font-family: "Yu Gothic UI", "Meiryo", sans-serif;
+      }
+      body {
+        display: flex; align-items: center; justify-content: center;
+        flex-direction: column; gap: 8px;
+      }
+      #wrap { position: relative; }
+      canvas#game {
+        display: block;
+        width: 960px; height: 720px;
+        background: #000;
+        box-shadow: 0 0 24px rgba(0,0,0,0.6);
+        cursor: crosshair;
+      }
+      #hint {
+        font-size: 13px; color: #bbb;
+        max-width: 960px; text-align: center;
+      }
+      #hint b { color: #fff; }
+    </style>
+  </head>
+  <body>
+    <div id="wrap">
+      <canvas id="game" width="960" height="720"></canvas>
+    </div>
+    <div id="hint">
+      床マスをクリックで設置 / 設置済みの塔をクリック→空きマスをクリックで<b>移動</b> /
+      <b>1〜4</b> で塔を選択 / <b>ESC</b> で移動取消 / <b>R</b> リスタート
+    </div>
+    <script>
+"use strict";
+
+// ============================================================
+// トイレ防衛隊：清潔圏崩壊（半分手動版）
+// 仕様: ../仕様.md
+// 構成:
+//   - 90秒1本勝負（Stage1 45秒 + Stage2 45秒）
+//   - アップグレードなし（塔は単一スペックで簡単）
+//   - 塔も HP を持ち、敵の通過攻撃で壊れる
+//   - タイトル / 物語バナー / 結果画面でストーリー演出
+//   - グラフィックは CODEX版から移植
+// ============================================================
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+ctx.imageSmoothingEnabled = true;
+const SCALE = 3;
+ctx.scale(SCALE, SCALE);
+
+const W = 320, H = 240;
+const TILE = 16;
+const MAP_W = 20;
+const PLAY_TOP = 16;
+const PLAY_BOTTOM = 208;
+const PLAY_H_TILES = (PLAY_BOTTOM - PLAY_TOP) / TILE;
+
+// ---------- 道（ステージごとに切り替わる） ----------
+// Stage1: シンプルな2本のL字（清潔な日常導線）
+// Stage2: 瓦礫のせいで通路が崩壊→ジグザグ化（より曲がる＝塔配置の戦略性UP）
+// 各ステージの「前半」パス
+const PATHS_BY_STAGE_EARLY = {
+  1: [
+    [{tx:19,ty:1},{tx:5,ty:1},{tx:5,ty:4},{tx:0,ty:4}],
+    [{tx:19,ty:11},{tx:15,ty:11},{tx:15,ty:8},{tx:0,ty:8}],
+  ],
+  2: [
+    [{tx:19,ty:2},{tx:14,ty:2},{tx:14,ty:5},{tx:8,ty:5},{tx:8,ty:2},{tx:3,ty:2},{tx:3,ty:5},{tx:0,ty:5}],
+    [{tx:19,ty:10},{tx:15,ty:10},{tx:15,ty:7},{tx:10,ty:7},{tx:10,ty:10},{tx:5,ty:10},{tx:5,ty:7},{tx:0,ty:7}],
+  ],
+  3: [
+    [{tx:19,ty:1},{tx:16,ty:1},{tx:16,ty:6},{tx:11,ty:6},{tx:11,ty:1},{tx:6,ty:1},{tx:6,ty:9},{tx:2,ty:9},{tx:2,ty:3},{tx:0,ty:3}],
+    [{tx:19,ty:11},{tx:14,ty:11},{tx:14,ty:4},{tx:10,ty:4},{tx:10,ty:11},{tx:7,ty:11},{tx:7,ty:5},{tx:3,ty:5},{tx:3,ty:11},{tx:0,ty:11}],
+  ],
+};
+// 各ステージの「後半」パス（中盤の「path会話」で切り替わる）
+const PATHS_BY_STAGE_LATE = {
+  1: [
+    [{tx:19,ty:2},{tx:13,ty:2},{tx:13,ty:5},{tx:7,ty:5},{tx:7,ty:2},{tx:0,ty:2}],
+    [{tx:19,ty:10},{tx:14,ty:10},{tx:14,ty:7},{tx:8,ty:7},{tx:8,ty:10},{tx:0,ty:10}],
+  ],
+  2: [
+    [{tx:19,ty:1},{tx:14,ty:1},{tx:14,ty:4},{tx:10,ty:4},{tx:10,ty:1},{tx:5,ty:1},{tx:5,ty:4},{tx:2,ty:4},{tx:2,ty:1},{tx:0,ty:1}],
+    [{tx:19,ty:11},{tx:13,ty:11},{tx:13,ty:8},{tx:9,ty:8},{tx:9,ty:11},{tx:5,ty:11},{tx:5,ty:8},{tx:0,ty:8}],
+  ],
+  3: [
+    [{tx:19,ty:2},{tx:17,ty:2},{tx:17,ty:5},{tx:13,ty:5},{tx:13,ty:2},{tx:9,ty:2},{tx:9,ty:8},{tx:5,ty:8},{tx:5,ty:3},{tx:0,ty:3}],
+    [{tx:19,ty:10},{tx:15,ty:10},{tx:15,ty:6},{tx:11,ty:6},{tx:11,ty:10},{tx:7,ty:10},{tx:7,ty:4},{tx:3,ty:4},{tx:3,ty:10},{tx:0,ty:10}],
+  ],
+};
+// 互換のため
+const PATHS_BY_STAGE = PATHS_BY_STAGE_EARLY;
+let PATHS = PATHS_BY_STAGE_EARLY[1];
+let pathTiles = new Set();
+function rebuildPathTiles() {
+  pathTiles = new Set();
+  for (const PATH of PATHS) {
+    for (let i = 0; i < PATH.length - 1; i++) {
+      const a = PATH[i], b = PATH[i+1];
+      if (a.tx === b.tx) {
+        const lo = Math.min(a.ty, b.ty), hi = Math.max(a.ty, b.ty);
+        for (let y = lo; y <= hi; y++) pathTiles.add(y * MAP_W + a.tx);
+      } else {
+        const lo = Math.min(a.tx, b.tx), hi = Math.max(a.tx, b.tx);
+        for (let x = lo; x <= hi; x++) pathTiles.add(a.ty * MAP_W + x);
+      }
+    }
+  }
+}
+function setStagePaths(stage, phase) {
+  // phase: "early" (default) | "late"
+  const src = phase === "late" ? PATHS_BY_STAGE_LATE : PATHS_BY_STAGE_EARLY;
+  PATHS = src[stage] || src[1];
+  rebuildPathTiles();
+}
+rebuildPathTiles();
+function pathPx(idx) {
+  return PATHS[idx].map(p => ({
+    x: p.tx * TILE + TILE/2,
+    y: PLAY_TOP + p.ty * TILE + TILE/2,
+  }));
+}
+
+// ---------- 汚染グリッド ----------
+const contam = new Float32Array(MAP_W * PLAY_H_TILES);
+function getContam(tx, ty) {
+  if (tx < 0 || tx >= MAP_W || ty < 0 || ty >= PLAY_H_TILES) return 0;
+  return contam[ty * MAP_W + tx];
+}
+function setContam(tx, ty, v) {
+  if (tx < 0 || tx >= MAP_W || ty < 0 || ty >= PLAY_H_TILES) return;
+  contam[ty * MAP_W + tx] = Math.max(0, Math.min(100, v));
+}
+function avgContam() {
+  let s = 0;
+  for (let i = 0; i < contam.length; i++) s += contam[i];
+  return s / contam.length;
+}
+
+// ---------- 塔データ（単一スペック） ----------
+const TOWER_DEFS = {
+  toilet:  { name: "便器",   desc: "詰まる前提",   color: "#e8f8ff", cost: 50, range: 56, dmg: 14, cd: 0.6, hp: 110 },
+  sink:    { name: "洗面台", desc: "石鹸切れ",     color: "#9de7ff", cost: 60, range: 48, slow: 0.50, hp: 150 },
+  // ペーパー：敵を紙で縛りつけて動きを止める（範囲拘束）。副次で汚染も削る。タフ
+  paper:   { name: "ペーパー", desc: "敵を縛る",   color: "#fff8d8", cost: 40, radius: 3, clean: 1.6, snareDur: 0.7, hp: 180 },
+  plunger: { name: "スッポン", desc: "前任の遺品", color: "#ff8066", cost: 30, range: 30, dmg: 6, cd: 0.45, knock: 20, hp: 100 },
+};
+const TOWER_KEYS = ["toilet", "sink", "paper", "plunger"];
+
+const ENEMY_DEFS = {
+  roach:    { name:"ゴキブリ",     hp: 18,  speed: 36, contam: 6,  reward: 5,  color:"#3a2a1a", size: 6,  towerDmg: 2  },
+  poop:     { name:"うんち",       hp: 55,  speed: 18, contam: 22, reward: 10, color:"#5a3a1a", size: 9,  towerDmg: 6  },
+  child:    { name:"手を洗わぬ子", hp: 32,  speed: 52, contam: 4,  reward: 8,  color:"#d08858", size: 7,  towerDmg: 9  },
+  // ボス：HPは高い（タンク）／攻撃力は控えめ（プレイヤーが立ち回りで凌げる）
+  boss:     { name:"汚染の主",     hp: 1040, speed: 14, contam: 40, reward: 90, color:"#2a1820", size: 13,
+              towerDmg: 6, auraR: 38, auraDps: 2.5, knockResist: 0.18,
+              shootRange: 70, shootCd: 2.8, shootDmg: 5, shootColor:"#5a3e22", boss: true },
+  bratboss: { name:"ガキ大将",     hp: 720, speed: 28, contam: 18, reward: 70, color:"#4a3618", size: 11,
+              towerDmg: 5, auraR: 30, auraDps: 2.0, knockResist: 0.05,
+              shootRange: 60, shootCd: 2.4, shootDmg: 4, shootColor:"#7c5526", boss: true },
+  poopking: { name:"ウンチの王",   hp: 1520, speed: 11, contam: 60, reward: 110, color:"#3a1f10", size: 14,
+              towerDmg: 7, auraR: 46, auraDps: 3.0, knockResist: 0.12,
+              shootRange: 84, shootCd: 3.0, shootDmg: 6, shootColor:"#3a1f10", boss: true },
+};
+
+// ---------- スプライト定義（CODEX版の透過PNG群を直接利用：チロマキー不要） ----------
+// 1キャラ = 4枚の独立PNG（_0〜_3）。`onerror` で別パスを順に試し、開発/dist/単体起動 すべてで通す。
+const SPRITE_DIR_CANDIDATES = [
+  "assets/sprites/",
+  "./assets/sprites/",
+  "../CODEX版/public/assets/generated/", // フォールバック
+];
+const BG_DIR_CANDIDATES = ["assets/sprites/", "../グラフィック/"];
+const SPRITE_FRAMES = 4;
+const SPRITES = {
+  toilet:  { drawW: 30, drawH: 34, anchor: "bottom", attackFrame: 2, frames: [] },
+  sink:    { drawW: 28, drawH: 32, anchor: "bottom", attackFrame: 2, frames: [] },
+  paper:   { drawW: 24, drawH: 28, anchor: "bottom", attackFrame: 2, frames: [] },
+  plunger: { drawW: 26, drawH: 30, anchor: "bottom", attackFrame: 2, frames: [] },
+  roach:   { drawW: 24, drawH: 16, anchor: "center", attackFrame: 2, frames: [] },
+  poop:    { drawW: 24, drawH: 22, anchor: "center", attackFrame: 2, frames: [] },
+  child:   { drawW: 22, drawH: 28, anchor: "center", attackFrame: 2, frames: [] },
+  boss:    { drawW: 42, drawH: 48, anchor: "center", attackFrame: 2, frames: [] },
+  // 新ボス（シートから切り出したフレームをここに格納）
+  bratboss:{ drawW: 30, drawH: 38, anchor: "center", attackFrame: 1, frames: [] },
+  poopking:{ drawW: 44, drawH: 50, anchor: "center", attackFrame: 1, frames: [] },
+};
+
+// シート1枚を 4列×2行 = 8フレームの想定で 4フレームに切り出し（上段0..3を walk として使用）
+// file:// だと getImageData が SecurityError を投げるので try/catch で緑背景のまま続行
+function sliceSpriteSheet(img, cols, rows, useFrames) {
+  const fw = Math.floor(img.naturalWidth / cols);
+  const fh = Math.floor(img.naturalHeight / rows);
+  const out = [];
+  for (const f of useFrames) {
+    const cx = f % cols, cy = Math.floor(f / cols);
+    const cv = document.createElement("canvas");
+    cv.width = fw; cv.height = fh;
+    const g = cv.getContext("2d");
+    g.imageSmoothingEnabled = false;
+    g.drawImage(img, cx * fw, cy * fh, fw, fh, 0, 0, fw, fh);
+    // 緑背景チロマキー（tainted canvas の場合は失敗するので緑のまま続行）
+    try {
+      const id = g.getImageData(0, 0, fw, fh);
+      const d = id.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const r = d[i], gv = d[i+1], b = d[i+2];
+        if (gv > 130 && gv > r * 1.35 && gv > b * 1.35) {
+          d[i+3] = 0;
+        } else if (gv > 100 && gv > r * 1.12 && gv > b * 1.12) {
+          const t = Math.min(1, (gv - 90) / 80);
+          d[i+3] = Math.max(0, d[i+3] - 220 * t);
+          d[i] = Math.min(255, d[i] + 6);
+        }
+      }
+      g.putImageData(id, 0, 0);
+    } catch (err) {
+      // 高確率で SecurityError (file:// + 画像 → tainted canvas)
+      console.warn("[chromaKey] skipped due to tainted canvas:", err.message);
+    }
+    out.push(cv);
+  }
+  return out;
+}
+
+let BG_STAGE1 = null, BG_STAGE2 = null;
+let BG_STATES = [null, null, null, null]; // 0=ピカピカ / 1=普通 / 2=汚 / 3=崩壊
+let PORTRAITS = { clean:null, rookie:null, brat:null, filth:null, king:null };
+// 紙芝居用シーン画像（プロローグ13枚、エンディング3種×5枚）
+let PROLOGUE_IMAGES = [];   // [scene_01..scene_NN]
+let ENDING_IMAGES = { win:[], lose_hp:[], lose_contam:[] };
+let SPRITE_LOAD_FAILED_REASON = "";
+
+function loadImgFallback(candidates) {
+  // 一つずつ試す。どれかが解決すれば返す。全滅したら null。
+  return new Promise((resolve) => {
+    const img = new Image();
+    let i = 0;
+    img.onload = () => resolve(img);
+    img.onerror = () => {
+      i += 1;
+      if (i < candidates.length) img.src = candidates[i];
+      else resolve(null);
+    };
+    img.src = candidates[0];
+  });
+}
+function loadImg(src) { return loadImgFallback([src]); }
+
+async function loadAllSprites() {
+  const tasks = [];
+  for (const [name, spec] of Object.entries(SPRITES)) {
+    if (name === "bratboss" || name === "poopking") continue; // シート方式で別経路
+    for (let i = 0; i < SPRITE_FRAMES; i++) {
+      const cands = SPRITE_DIR_CANDIDATES.map(d => d + name + "_" + i + ".png");
+      tasks.push(loadImgFallback(cands).then(im => { spec.frames[i] = im; }).catch(()=>{}));
+    }
+  }
+  // 背景：5月8日生成の2枚（旧）。互換のため残す。
+  const bg1 = BG_DIR_CANDIDATES.map(d => d + encodeURIComponent("ChatGPT Image 2026年5月8日 20_45_59 (1).png"));
+  const bg2 = BG_DIR_CANDIDATES.map(d => d + encodeURIComponent("ChatGPT Image 2026年5月8日 20_45_59 (2).png"));
+  tasks.push(loadImgFallback(bg1).then(im => { BG_STAGE1 = im; }).catch(()=>{}));
+  tasks.push(loadImgFallback(bg2).then(im => { BG_STAGE2 = im; }).catch(()=>{}));
+  // 動的BG：4状態（清潔→普通→汚→崩壊）
+  for (let i = 0; i < 4; i++) {
+    tasks.push(loadImgFallback([`assets/bg/state_${i}.png`, `./assets/bg/state_${i}.png`]).then(im => { BG_STATES[i] = im; }).catch(()=>{}));
+  }
+  // 会話用立ち絵（PILで緑抜き済）
+  for (const k of ["clean", "rookie", "brat", "filth", "king"]) {
+    tasks.push(loadImgFallback([`assets/portraits/port_${k}.png`, `./assets/portraits/port_${k}.png`]).then(im => { if (im) PORTRAITS[k] = im; }).catch(()=>{}));
+  }
+  // 紙芝居：プロローグ13枚（無いものは BG_STATES フォールバック）
+  for (let i = 1; i <= 13; i++) {
+    const idx = i - 1;
+    const num = String(i).padStart(2, "0");
+    tasks.push(loadImgFallback([
+      `assets/prologue/scene_${num}.png`,
+      `./assets/prologue/scene_${num}.png`,
+      `../plorogue/scene_${num}.png`,    // ユーザー初期配置のフォールバック（typo）
+    ]).then(im => { if (im) PROLOGUE_IMAGES[idx] = im; }).catch(()=>{}));
+  }
+  // 紙芝居：エンディング3種×5枚
+  for (const kind of ["win", "lose_hp", "lose_contam"]) {
+    ENDING_IMAGES[kind] = [];
+    for (let i = 1; i <= 5; i++) {
+      const idx = i - 1;
+      const num = String(i).padStart(2, "0");
+      tasks.push(loadImgFallback([
+        `assets/ending/${kind}_${num}.png`,
+        `./assets/ending/${kind}_${num}.png`,
+        `../ending/${kind}_${num}.png`,
+      ]).then(im => { if (im) ENDING_IMAGES[kind][idx] = im; }).catch(()=>{}));
+    }
+  }
+  // 新ボスのシート（PILで緑抜き済みの _trans 優先、無ければ素のシート）
+  tasks.push(loadImgFallback([
+    "assets/sprites/bratboss_sheet_trans.png", "./assets/sprites/bratboss_sheet_trans.png",
+    "assets/sprites/bratboss_sheet.png", "./assets/sprites/bratboss_sheet.png",
+  ]).then(im => {
+    try {
+      if (im && im.naturalWidth > 0) SPRITES.bratboss.frames = sliceSpriteSheet(im, 4, 2, [0, 1, 2, 3]);
+      // 会話用フレーム（怒り/泣きなど）も切る
+      if (im && im.naturalWidth > 0) SPRITES.bratboss.portraits = sliceSpriteSheet(im, 4, 2, [0, 4, 5, 7]);
+    } catch (e) { console.warn("[bratboss] slice failed:", e.message); }
+  }).catch(()=>{}));
+  tasks.push(loadImgFallback([
+    "assets/sprites/poopking_sheet_trans.png", "./assets/sprites/poopking_sheet_trans.png",
+    "assets/sprites/poopking_sheet.png", "./assets/sprites/poopking_sheet.png",
+  ]).then(im => {
+    try {
+      if (im && im.naturalWidth > 0) SPRITES.poopking.frames = sliceSpriteSheet(im, 4, 2, [0, 1, 2, 3]);
+      if (im && im.naturalWidth > 0) SPRITES.poopking.portraits = sliceSpriteSheet(im, 4, 2, [0, 2, 3, 7]);
+    } catch (e) { console.warn("[poopking] slice failed:", e.message); }
+  }).catch(()=>{}));
+
+  await Promise.all(tasks);
+
+  // 1枚も読めなかった場合のフォールバック告知
+  const anySprite = Object.values(SPRITES).some(s => s.frames.some(f => f && f.naturalWidth > 0));
+  if (!anySprite) {
+    SPRITE_LOAD_FAILED_REASON = "スプライトが読めません。CODEX版/assets/generated/ を確認してください。";
+  }
+}
+
+function drawSpriteFrame(type, frame, dx, dy, scale = 1) {
+  const spec = SPRITES[type];
+  if (!spec || !spec.frames || spec.frames.length === 0) return false;
+  const f = spec.frames[Math.abs(frame|0) % spec.frames.length];
+  if (!f) return false;
+  if (f instanceof HTMLImageElement && (!f.complete || f.naturalWidth <= 0)) return false;
+  const fw = f.naturalWidth || f.width;
+  const fh = f.naturalHeight || f.height;
+  if (!fw || !fh) return false;
+  const maxW = spec.drawW * scale, maxH = spec.drawH * scale;
+  const k = Math.min(maxW / fw, maxH / fh);
+  const w = Math.max(1, Math.round(fw * k));
+  const h = Math.max(1, Math.round(fh * k));
+  const ax = Math.round(dx - w / 2);
+  const ay = Math.round(spec.anchor === "bottom" ? dy - h : dy - h / 2);
+  ctx.drawImage(f, ax, ay, w, h);
+  return true;
+}
+
+// ---------- ストーリーテキスト ----------
+const STORY = {
+  title_main: "便所最後の45秒×2",
+  title_sub1: "前任清掃員：逃亡 / 後任：あなた",
+  title_sub2: "保健所査察まであと90秒",
+  title_cta:  "クリックで着任",
+};
+
+// SEQ_OPENING は廃止：プロローグの紙芝居で着任までを語り切ったため、
+// startPlay からは直接 DIALOG.stage1_intro へ。
+const SEQ_OPENING = [];
+
+// ───────── 物語：プレイ中の小バナー ─────────
+const STORY_LINES = {
+  // 敵初出
+  enemy_roach:    { speaker:"新人",     text:"ゴキブリ。一匹目を見た瞬間、二匹目以降は概念として既に居ます。" },
+  enemy_poop:     { speaker:"清掃班長", text:"『誰かが流すだろう』を全員でやった結果、床に堆積した実績だ。" },
+  enemy_child:    { speaker:"新人",     text:"手を洗わぬ子。実は大人の縮尺モデル。教育では直りません。" },
+  // 戦況の小バナー
+  stage1_warn:    { speaker:"清掃班長", text:"床が茶色くなったらペーパーだ。『あとで拭く』の『あと』は、来ない。" },
+  stage2_warn:    { speaker:"新人",     text:"汚染、広がってます。空気と私の自尊心が、同時に負けてます。" },
+  stage3_warn:    { speaker:"清掃班長", text:"よくここまで来た。──ここからは、お前の番だ。" },
+  diary_1:        { speaker:"前任の日記", text:"『04/12 床が呼ぶ。私は応じてしまう。私は治る側じゃない。』" },
+  diary_2:        { speaker:"前任の日記", text:"『06/03 床の柄を思い出せない。それでも来週、ここに来る。』" },
+  diary_3:        { speaker:"前任の日記", text:"『09/22 もし後任が来たら──私を責めるなと、書いておく。』" },
+};
+
+// ───────── 会話シーケンス（pause-dialogue：ゲーム停止）─────────
+// 統一トーン：淡々／乾いた黒ジョーク／便所＝最後の文明の最前線
+// 文量2倍：各セリフを長文化＋追加カットで物語を厚く
+const DIALOG = {
+  // ─── Act 1：習慣は午前9時に死ぬ ───
+  stage1_intro: [
+    { who:"clean",  text:"今日は、ゴキブリと、走る子供と、見えない埃が来る。三大害だ。" },
+    { who:"rookie", text:"……走る子供って、何の脅威ですか？ ただ走ってるだけでは。" },
+    { who:"clean",  text:"走るからだ。便所では、走るやつが、一番怖い。" },
+    { who:"clean",  text:"走った床は滑る。滑った床は、誰かの腰を持っていく。腰は便所の通貨だ。" },
+    { who:"rookie", text:"通貨、ですか。" },
+    { who:"clean",  text:"流通してる。冗談じゃなく。──持ち場へ。便器を据えろ。便所では、据える方が早い。" },
+  ],
+  stage1_path: [
+    { who:"clean",  text:"パイプが、鳴いたな。聞こえるか、新任。" },
+    { who:"rookie", text:"……鳴く配管なんて、聞いたことありません。生き物じゃないんですから。" },
+    { who:"clean",  text:"どんな配管も、限界が来れば歌う。20年前から、決まってる。" },
+    { who:"clean",  text:"歌った配管の下では、床が割れる。割れた床の下から、奴らは来る。" },
+    { who:"rookie", text:"奴ら、って、ゴキブリですか。汚物ですか。" },
+    { who:"clean",  text:"両方だ。あと、走る子供。──通路が変わる。塔を、据え直せ。手は急げ。" },
+  ],
+  stage1_boss_pre: [
+    { who:"clean",  text:"足音だ。──ガキ大将。" },
+    { who:"rookie", text:"小学生ですか？ 警察に通報しません？" },
+    { who:"clean",  text:"通報されたガキは、たいてい、便所に戻ってくる。だから家じゃなく便所に来る。" },
+    { who:"clean",  text:"便所を遊び場と勘違いした、未来の大人だ。" },
+    { who:"clean",  text:"倒すんじゃない。帰すんだ。家がある側へ、教えるように、押し戻せ。" },
+  ],
+  stage1_boss_in: [
+    { who:"brat",   text:"オレが大将だぞー！ 便所はオレのもんだー！", emo:0 },
+    { who:"brat",   text:"床に水まいてー！ 紙ぐっちゃぐちゃー！ 誰も入ってこねぇー！", emo:1 },
+    { who:"brat",   text:"オレの城ー！ オレの王国ー！", emo:0 },
+    { who:"clean",  text:"立て看板、読めるか、坊主。『落書き禁止』。読めなくても、書ける、らしいな。" },
+    { who:"rookie", text:"……ヤンキーじゃなくて、本当に小学生ですよね。" },
+    { who:"clean",  text:"両方だ。便所では、両方ありえる。" },
+  ],
+  stage1_boss_kill: [
+    { who:"brat",   text:"うっ……うわぁぁぁ……。", emo:2 },
+    { who:"rookie", text:"……泣いてます。びっくりするくらい、泣いてます。" },
+    { who:"clean",  text:"泣いてる時だけ、人間に戻る。覚えとけ、新任。" },
+    { who:"clean",  text:"明日、家のポストに『便所では走るな』と書いた紙が届く。" },
+    { who:"clean",  text:"親が読む。子は読まない。それで、たいてい、3年は来ない。" },
+    { who:"rookie", text:"……便所、子供にとって、結構な人生イベントなんですね。" },
+  ],
+
+  // ─── Act 2：流せなかった者の、王 ───
+  stage2_intro: [
+    { who:"clean",  text:"第二波だ。──ここから、私の昔話が、少し混じる。" },
+    { who:"rookie", text:"昔話、ですか。今、ですか？" },
+    { who:"clean",  text:"今しかない。第二波の朝に語らなかった話は、たいてい、永遠に語らない。" },
+    { who:"clean",  text:"私も、この職場で、新任の朝を経験した。20年前のことだ。" },
+    { who:"clean",  text:"前任が、私を逃がして、消えた。床に、紙が一枚、残されていた。" },
+    { who:"rookie", text:"……何て書いてあったんですか。" },
+    { who:"clean",  text:"『悪いな。お前なら、20年は持つ』。当たってた。腹立つことに。" },
+    { who:"clean",  text:"床は、減らない。守る人だけは、いつも、いる。それだけだ。" },
+  ],
+  stage2_path: [
+    { who:"rookie", text:"瓦礫が、転がってきました！ 配管、たぶん、奥の壁、抜けてます。" },
+    { who:"clean",  text:"そう来るか。20年経っても、瓦礫の落ち方は、変わらないな。" },
+    { who:"clean",  text:"私の新任の朝も、同じ位置で、同じ落ち方をした。便所の癖、というやつだ。" },
+    { who:"clean",  text:"新しい通路を踏むのは、お前が初代だ。──ように見えて、二代目だ。" },
+    { who:"rookie", text:"……名誉、なんですかね、これ。" },
+    { who:"clean",  text:"名誉ではない。ただ、踏み抜かないように、気をつけろ。" },
+  ],
+  stage2_boss_pre: [
+    { who:"clean",  text:"あれが、私の最初の朝の、王だ。" },
+    { who:"rookie", text:"王、ですか。便所に。冗談じゃないんですか。" },
+    { who:"clean",  text:"冗談だったら良かった。流れない、流せない、流されざる者の、王。" },
+    { who:"clean",  text:"20年前、私は震えた。前任が逃がしてくれて、私は便器の影で、震え続けた。" },
+    { who:"clean",  text:"翌朝、王は消えていた。前任もだ。日記だけ、ロッカーに残ってた。" },
+    { who:"rookie", text:"……それで、班長は、20年。" },
+    { who:"clean",  text:"そうだ。20年、震え続けてる。──だが、今日は、隣に、お前がいる。" },
+  ],
+  stage2_boss_in: [
+    { who:"king",   text:"久しいな、清掃の者よ。", emo:0 },
+    { who:"king",   text:"我は、流されざる者の、王。床は、誰の手にも、渡らぬ。", emo:1 },
+    { who:"king",   text:"君らが、20年前に、流せなかった。その記憶は、朕の力となった。", emo:2 },
+    { who:"rookie", text:"……班長を、覚えてるんですね、こいつ。" },
+    { who:"clean",  text:"覚えてる。20年、こちらも、忘れていない。だから、今日、ここにいる。" },
+    { who:"clean",  text:"新任。便所の戦いは、覚えてもらった瞬間、始まる。──覚えとけ。" },
+  ],
+  stage2_boss_kill: [
+    { who:"king",   text:"……次は、お前たちの、息子の、代で、また会おう。", emo:3 },
+    { who:"king",   text:"朕は、流されぬ。ただ、忘れられるだけだ。", emo:3 },
+    { who:"clean",  text:"勝った。──お前が、勝った、新任。20年遅れた、私の借りも、返した。" },
+    { who:"rookie", text:"班長と、二人で、勝ちました。一人じゃなかったの、本当によかった。" },
+    { who:"clean",  text:"二人だ。──ありがとうな。20年、生きててよかった。" },
+  ],
+
+  // ─── Act 3：引退の朝、最後の主 ───
+  stage3_intro: [
+    { who:"clean",  text:"今日、私は引退する。──書類は、もう、出してある。" },
+    { who:"rookie", text:"えっ、突然──昨日まで、何も言ってませんでしたよね。" },
+    { who:"clean",  text:"突然じゃない。20年、引退しようと思いながら、20年経った。" },
+    { who:"clean",  text:"言わなかったのは、言うと、ロッカーで噂になるからだ。便所の噂は、配管より早い。" },
+    { who:"rookie", text:"……配管より、早い。" },
+    { who:"clean",  text:"次の新任が来る前に、お前ひとりで守れる便所に、しておきたい。" },
+    { who:"clean",  text:"だから今日は、私は、後ろから見てる。前に出ない。──怖いか。" },
+    { who:"rookie", text:"……怖いです。とても。" },
+    { who:"clean",  text:"良い。怖くない奴は、3年で、もういない。怖さは、続けるための、燃料だ。" },
+  ],
+  stage3_path: [
+    { who:"clean",  text:"床下が、抜けたな。20年で、初めて見る形だ。──新しい便所だ。" },
+    { who:"clean",  text:"よく見ろ。──次の新任に、教える為に、見るんだ。" },
+    { who:"clean",  text:"お前が、教える側になる日が来る。それは、たぶん、想像より早い。" },
+    { who:"rookie", text:"班長。ここから先は、私、ひとりで戦います。" },
+    { who:"rookie", text:"班長は、ロッカーで、座っていてください。──今日まで、本当に、ありがとうございました。" },
+    { who:"clean",  text:"ああ。ロッカーの奥に、私の日記がある。読まなくていい。" },
+    { who:"clean",  text:"辞めたくなったら、開け。──開けたら、たぶん、辞めたくなくなる。理屈は、書いてない。" },
+  ],
+  stage3_boss_pre: [
+    { who:"rookie", text:"……音が、ありません。班長、これは──" },
+    { who:"clean",  text:"アレが来る前の、静寂だ。耳の奥が、痛くなる、あの静けさだ。" },
+    { who:"clean",  text:"汚染の主。フタを閉めぬ文化、全部の、集合体。" },
+    { who:"clean",  text:"20年、私は、こいつの存在を、信じないことにしてた。──信じてたら、辞めてた。" },
+    { who:"clean",  text:"私はここで降りる。お前ひとりで、会え。新任。──いや、班長。" },
+    { who:"rookie", text:"班長、今日まで、ありがとうございました。本当に、本当に。" },
+    { who:"clean",  text:"礼を言う相手は、私じゃない。お前の、前任だ。──私のな。" },
+  ],
+  stage3_boss_in: [
+    { who:"filth",  text:"我は、フタを閉めぬ文化の、集合体である。", emo:0 },
+    { who:"filth",  text:"君らが、流せなかった全てが、ここに、集まった。", emo:1 },
+    { who:"filth",  text:"見て見ぬふりした、紙くず。後で拭くと言った、足跡。流したつもりの、罪。", emo:1 },
+    { who:"filth",  text:"全て、朕の血肉である。──床は、私の、ものだ。", emo:2 },
+    { who:"rookie", text:"渡しません。私は、清掃員、です。" },
+    { who:"rookie", text:"見て見ぬふりした人たちの代わりに、今日、私が、あなたを、流します。" },
+  ],
+  stage3_boss_kill: [
+    { who:"filth",  text:"……我を、流すか、新任よ。", emo:3 },
+    { who:"filth",  text:"流された者は、誰かに、覚えていてもらえる。朕は、忘れられたまま、流れる。", emo:3 },
+    { who:"rookie", text:"覚えてます。私が、覚えてます。だから、流れて、ください。" },
+    { who:"rookie", text:"誰かが、流さないと、いけないので。──それが、私の、仕事です。" },
+    { who:"clean",  text:"（お疲れさん、新任。──いや、もう、班長、だな。）" },
+    { who:"clean",  text:"（私は、ロッカーで、お茶を淹れて、待ってる。）" },
+  ],
+
+  // ─── 勝敗 ───
+  win: [
+    { who:"rookie",    text:"……査察、終わりました。班長、保健所、帰ります。" },
+    { who:"inspector", text:"床、ぎりぎり原型を、保っています。再来週、また、伺います。" },
+    { who:"inspector", text:"今日のチェックは、一つで済みました。継続を、お願いします。" },
+    { who:"rookie",    text:"再来週も、来ます。──来週も、来ます。毎週、来ます。" },
+    { who:"rookie",    text:"（班長は、もういない。ロッカーには、お茶のセットと、日記が、置いてある。）" },
+    { who:"rookie",    text:"（読まないって、決めた。読んだら、辞めたくなりそうだから。）" },
+    { who:"rookie",    text:"（でも、いつか、辞めたくなったら、その時に、開ける。）" },
+    { who:"rookie",    text:"（その時まで、私は、ここに、いる。）" },
+  ],
+  lose_hp: [
+    { who:"clean",  text:"便所の清潔度が、ゼロになった。ここまでだ。──ここまでだな、新任。" },
+    { who:"rookie", text:"明日、来ます。今日のは、慣らしです。明日、もう一度、最初から、やります。" },
+    { who:"clean",  text:"来なくていい。──逃げろ。便所で唯一、許された、選択だ。" },
+    { who:"clean",  text:"前任もそうした。前任の前任も、そうした。誰も責めない。便所は、責める場所じゃない。" },
+    { who:"rookie", text:"でも、誰かが、来ないと。来ないと、街の、トイレが、ゼロになります。" },
+    { who:"clean",  text:"……だから、3年で、誰もが消えるんだ。お前も、消えていい。許されてる。" },
+    { who:"clean",  text:"消えたあと、また、戻ってきても、いい。便所は、扉を閉めない場所だ。" },
+  ],
+  lose_contam: [
+    { who:"inspector", text:"床が、原型を失いました。閉鎖、措置です。──申し訳ない。" },
+    { who:"rookie",    text:"……すみません。本当に、すみません。" },
+    { who:"clean",     text:"謝るな。20年やった私の代でも、何度も、閉まった。閉まらない便所は、ない。" },
+    { who:"clean",     text:"閉まる便所は、たいてい、また開く。──別の、誰かの、手で。" },
+    { who:"clean",     text:"我々の仕事は、開け続けることじゃない。次の誰かに、開け方を、残すことだ。" },
+    { who:"rookie",    text:"……日記、書きます。書いておきます。次の人のために。" },
+  ],
+};
+
+// ───────── プロローグ（紙芝居：背景画像＋テロップ） ─────────
+// bg: 0=ピカピカ / 1=普通 / 2=汚 / 3=崩壊
+// 統一トーン：淡々とした絶望×乾いた黒ジョーク。便所＝最後の文明拠点
+const PROLOGUE_SCENES = [
+  { kind:"narr", bg:3, filter:"sepia", dur:4.2,
+    head:"西暦 20XX 年。",
+    body:["ヒトは、トイレを失った。"] },
+  { kind:"narr", bg:3, filter:"dim", dur:4.4,
+    body:["理由は──まあ、察してくれ。",
+          "誰も、覚えていないことに、している。"] },
+  { kind:"narr", bg:2, filter:"none", dur:4.6,
+    body:["街のトイレが順に閉まり、最後に残ったのが、ここだ。",
+          "第七公衆便所。通称──"] },
+  { kind:"title", bg:0, filter:"glow", dur:4.0,
+    head:"《 清 潔 圏 》",
+    body:["ここ以外、もう、ない。"] },
+  { kind:"memo", bg:2, filter:"none", dur:5.4,
+    head:"清掃員規程 第三七条",
+    body:["『流すは祈り、確認は信仰、",
+          "  見て見ぬふりは即解雇。』",
+          "──最後の一行は、長らく適用されていない。"] },
+  { kind:"narr", bg:2, filter:"none", dur:4.6,
+    body:["歴代の清掃員は、平均三年で消えた。",
+          "逃亡が一名。失踪が二名。",
+          "残りは、便所と一体化したと、聞く。"] },
+  { kind:"dlg",  bg:2, filter:"none", dur:4.0, speaker:"清掃班長",
+    body:["よく来た、新任。",
+          "面接、隣ビルの飲食じゃなかったか？"] },
+  { kind:"dlg",  bg:2, filter:"none", dur:4.0, speaker:"新人",
+    body:["……履歴書、たぶん、配達ミスです。",
+          "あの、辞退、できますか。"] },
+  { kind:"dlg",  bg:2, filter:"warn", dur:4.6, speaker:"清掃班長",
+    body:["90秒後、保健所が来る。間に合わなきゃ、閉鎖だ。",
+          "閉鎖になれば、街にトイレは、ゼロだ。"] },
+  { kind:"dlg",  bg:2, filter:"warn", dur:4.4, speaker:"新人",
+    body:["……入って3秒で、",
+          "人類の責任ってやつ、背負わされました。"] },
+  { kind:"dlg",  bg:2, filter:"none", dur:4.6, speaker:"清掃班長",
+    body:["便器を据えろ。紙で磨け。スッポンで押し戻せ。",
+          "──武器は、便所にしか、ない。"] },
+  { kind:"narr", bg:3, filter:"warn", dur:3.8,
+    body:["そして、奥の個室から、",
+          "とんでもない呼吸音が、聞こえる。"] },
+  { kind:"cta",  bg:0, filter:"glow", dur:99,
+    head:"──汚染を、押し返せ。",
+    body:["クリックで着任",
+          "エスケープで飛ばす"] },
+];
+
+// ───────── エンディング（紙芝居） ─────────
+// 統一トーン：淡々／乾いた皮肉／清掃員の自己肯定なき矜持
+const ENDING_SCENES = {
+  win: [
+    { kind:"narr", bg:2, filter:"dim", dur:4.0,
+      head:"査察、終了。",
+      body:["保健所職員は、チェックを一つ入れて、何も言わずに帰った。"] },
+    { kind:"dlg",  bg:1, filter:"none", dur:4.4, speaker:"新人",
+      body:["……再来週、また来ます。",
+            "逃げる勇気があったら、今日が最後でした。"] },
+    { kind:"narr", bg:1, filter:"glow", dur:4.6,
+      head:"清潔圏、維持。",
+      body:["床に、元の柄が、見える。",
+            "白だった。──覚えて、いなかった。"] },
+    { kind:"narr", bg:0, filter:"glow", dur:4.4,
+      body:["ロッカーの奥に、班長の日記。",
+            "読まないと決めた。読んだら、辞めたくなりそうだから。"] },
+    { kind:"title",bg:0, filter:"glow", dur:99,
+      head:"便所守護神、認定。",
+      body:["来週もまた、ここに来る。",
+            "クリックでタイトルへ"] },
+  ],
+  lose_hp: [
+    { kind:"narr", bg:3, filter:"dim", dur:4.0,
+      head:"清潔度、ゼロ。",
+      body:["床が、ヒトの想像を超えた。"] },
+    { kind:"dlg",  bg:3, filter:"warn", dur:4.4, speaker:"清掃班長",
+      body:["閉鎖だ。──お前も、明日には、逃げてる。",
+            "前任と、同じ道だ。"] },
+    { kind:"dlg",  bg:3, filter:"dim",  dur:4.4, speaker:"新人",
+      body:["……日記、",
+            "読んでみても、いいですか。"] },
+    { kind:"narr", bg:3, filter:"sepia",dur:4.6,
+      head:"第七公衆便所、本日閉鎖。",
+      body:["街のトイレは、ゼロになった。"] },
+    { kind:"title",bg:3, filter:"dim",  dur:99,
+      head:"便所、閉鎖。",
+      body:["責任者は、逃亡済。",
+            "クリックで再挑戦"] },
+  ],
+  lose_contam: [
+    { kind:"narr", bg:3, filter:"warn", dur:4.0,
+      head:"汚染率、上限。",
+      body:["床は、原型を、失った。"] },
+    { kind:"dlg",  bg:3, filter:"warn", dur:4.6, speaker:"保健所",
+      body:["閉鎖、措置です。",
+            "清潔圏は、崩壊しました。"] },
+    { kind:"dlg",  bg:3, filter:"dim",  dur:4.4, speaker:"新人",
+      body:["……前任さんも、",
+            "この音、聞いてたんでしょうね。"] },
+    { kind:"narr", bg:3, filter:"sepia",dur:4.6,
+      head:"《 清 潔 圏 》崩壊。",
+      body:["20XX 年、最後のトイレが、消えた。"] },
+    { kind:"title",bg:3, filter:"dim",  dur:99,
+      head:"便所、閉鎖。",
+      body:["床は、もう、喋らない。",
+            "クリックで再挑戦"] },
+  ],
+};
+
+// ───────── オーディオ：WebAudio による音楽合成＋SFX ─────────
+let _audioStarted = false;
+let audioCtx = null, masterGain = null, musicGain = null, sfxGain = null;
+let _musicTrack = null, _musicTimer = null;
+
+function initAudio() {
+  if (audioCtx) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain(); masterGain.gain.value = 0.55; masterGain.connect(audioCtx.destination);
+    musicGain  = audioCtx.createGain(); musicGain.gain.value  = 0.45; musicGain.connect(masterGain);
+    sfxGain    = audioCtx.createGain(); sfxGain.gain.value    = 0.85; sfxGain.connect(masterGain);
+  } catch (e) { audioCtx = null; }
+}
+
+function _note(type, freq, t, dur, vol, dest) {
+  if (!audioCtx) return;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = type; o.frequency.value = freq;
+  o.connect(g); g.connect(dest || sfxGain);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + Math.min(0.02, dur * 0.2));
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.start(t); o.stop(t + dur + 0.05);
+}
+
+function sfx(name) {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  switch (name) {
+    case "place":   _note("triangle", 440, t, 0.10, 0.35); _note("triangle", 660, t + 0.05, 0.12, 0.30); break;
+    case "shoot":   _note("square", 900, t, 0.05, 0.15); break;
+    case "splash":  _note("sawtooth", 320, t, 0.12, 0.18); _note("sine", 180, t, 0.18, 0.14); break;
+    case "clean":   _note("sine", 1320, t, 0.08, 0.18); _note("sine", 1760, t + 0.04, 0.10, 0.14); break;
+    case "knock":   _note("triangle", 240, t, 0.12, 0.25); break;
+    case "kill":    _note("sawtooth", 220, t, 0.18, 0.25); _note("triangle", 100, t, 0.22, 0.18); break;
+    case "hpLoss":  _note("sawtooth", 130, t, 0.45, 0.40); _note("triangle", 60, t, 0.50, 0.30); break;
+    case "click":   _note("square", 1200, t, 0.04, 0.12); break;
+    case "boss":    // 重低音ホーン
+      _note("sawtooth", 55, t, 1.4, 0.55); _note("sawtooth", 82, t + 0.4, 1.0, 0.35); break;
+    case "bossKill": // 勝鬨アルペジオ
+      [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => _note("triangle", f, t + i * 0.10, 0.30, 0.35));
+      _note("sine", 1318.5, t + 0.40, 0.6, 0.25);
+      break;
+    case "win":     // 勝利ファンファーレ
+      [392, 523.25, 659.25, 783.99, 1046.5].forEach((f, i) => _note("triangle", f, t + i * 0.13, 0.35, 0.32));
+      break;
+    case "lose":
+      [220, 196, 174.6, 130.8].forEach((f, i) => _note("sawtooth", f, t + i * 0.18, 0.3, 0.28));
+      break;
+    case "stagewipe":
+      _note("sawtooth", 90, t, 0.55, 0.45); _note("sawtooth", 60, t + 0.18, 0.6, 0.35); break;
+  }
+}
+
+// 音楽：簡易ループパターン。ステージごとに切替
+const MUSIC_PATTERNS = {
+  title:  { tempo: 80,  bass:[110, 130.8, 110, 146.8],         lead:[329.6, 392, 440, 392], leadType:"triangle" },
+  stage1: { tempo: 92,  bass:[130.8, 196, 130.8, 174.6],       lead:[523.25, 659.25, 783.99, 659.25], leadType:"triangle" },
+  stage2: { tempo: 108, bass:[110, 138.6, 130.8, 116.5],       lead:[392, 466.16, 523.25, 466.16], leadType:"square" },
+  stage3: { tempo: 128, bass:[82.4, 92.5, 110, 87.3],          lead:[261.6, 311.1, 349.2, 392], leadType:"sawtooth" },
+  win:    { tempo: 96,  bass:[130.8, 174.6, 196, 261.6],       lead:[523.25, 659.25, 783.99, 1046.5], leadType:"triangle" },
+  lose:   { tempo: 60,  bass:[87.3, 73.4, 65.4, 58.2],         lead:[174.6, 164.8, 155.6, 146.8], leadType:"sawtooth" },
+};
+
+function music_play(track) {
+  if (!audioCtx) { _musicTrack = track; return; }
+  _musicTrack = track;
+  if (_musicTimer) { clearTimeout(_musicTimer); _musicTimer = null; }
+  _musicSchedule(audioCtx.currentTime + 0.06);
+}
+function music_stop() {
+  _musicTrack = null;
+  if (_musicTimer) { clearTimeout(_musicTimer); _musicTimer = null; }
+}
+function _musicSchedule(t0) {
+  if (!audioCtx || !_musicTrack) return;
+  const p = MUSIC_PATTERNS[_musicTrack];
+  if (!p) return;
+  const beat = 60 / p.tempo;
+  for (let i = 0; i < 4; i++) {
+    const tn = t0 + i * beat;
+    _note("sine",     p.bass[i % p.bass.length],   tn,                  beat * 0.85, 0.18, musicGain);
+    _note(p.leadType, p.lead[i % p.lead.length],   tn + beat * 0.10,    beat * 0.45, 0.10, musicGain);
+    // たまにオクターブ上の装飾
+    if ((i % 2) === 1) _note("triangle", p.lead[i % p.lead.length] * 2, tn + beat * 0.55, beat * 0.20, 0.06, musicGain);
+  }
+  const totalDur = 4 * beat;
+  _musicTimer = setTimeout(() => _musicSchedule(t0 + totalDur), Math.max(50, totalDur * 1000 - 80));
+}
+
+function storyText(s) { return (typeof s === "string") ? s : (s && s.text) || ""; }
+function queueStory(payload, dur) {
+  if (!game.storyQueue) game.storyQueue = [];
+  game.storyQueue.push({ payload, dur });
+}
+function queueStorySeq(seq) { for (const s of seq) queueStory({ speaker:s.speaker, text:s.text }, s.dur || 4.0); }
+
+// ---------- ゲーム状態 ----------
+let game;
+let _prologueSeen = false;
+function newGame(skipPrologue) {
+  const goPrologue = !skipPrologue && !_prologueSeen;
+  game = {
+    mode: goPrologue ? "prologue" : "title",
+    proIdx: 0,
+    proT: 0,
+    t: 0,
+    hp: 20,
+    coins: 110,
+    stage: 1,
+    stageT: 0,
+    won: false,
+    msg: "",
+    msgT: 0,
+    story: "",          // 中央バナー
+    storyT: 0,
+    storyMax: 0,
+    storyQueue: [],
+    seenEnemy: {},
+    bossIntroT: 0,
+    bossIntroMax: 0,
+    selected: "toilet",
+    movingTower: null,  // クリックで掴んだ塔 / 別マスをクリックで移動・ESCで取消
+    hover: { x: -999, y: -999, tx: -1, ty: -1, on: false },
+    towers: [],
+    enemies: [],
+    shots: [],
+    particles: [],
+    spawnQueue: [],
+    flash: 0,
+    entryContamAcc: 0,
+    nextPathIdx: 0,
+    enemyShots: [],
+  };
+  contam.fill(0);
+  setStagePaths(1);
+}
+
+function startPlay() {
+  game.mode = "playing";
+  game.msg = "Stage 1 着任";
+  game.msgT = 2.4;
+  game.storyQueue = [];
+  buildSpawnQueueStage1();
+  game.storyDiary1Fired = false;
+  game.storyDiary2Fired = false;
+  game.storyDiary3Fired = false;
+  game.stage1WarnFired = false;
+  game.stage2WarnFired = false;
+  game.stage3WarnFired = false;
+  game.pathChangedFired = false;
+  game.bossKills = 0;
+  music_play("stage1");
+  // 着任ダイアログ → ステージ1イントロを連続で
+  showDialog(SEQ_OPENING.map(s => ({ who: s.speaker === "新人" ? "rookie" : (s.speaker === "清掃班長" ? "clean" : (s.speaker === "前任の日記" ? "diary" : "clean")), text: s.text })), () => {
+    showDialog(DIALOG.stage1_intro, () => { game.mode = "playing"; });
+  });
+}
+
+// Stage 1：ガキ大将。通路変化(t=22.5)直後 t=25 にボス
+function buildSpawnQueueStage1() {
+  const q = [];
+  for (let i = 0; i < 4; i++) q.push({ t: 3 + i * 3, type: "roach" });
+  q.push({ t: 8,  type: "child" });
+  q.push({ t: 14, type: "roach" });
+  q.push({ t: 17, type: "poop" });
+  q.push({ t: 25, type: "bratboss" }); // ★ 通路変更直後にボス
+  for (let i = 0; i < 4; i++) q.push({ t: 32 + i * 2, type: "roach" });
+  q.push({ t: 38, type: "child" });
+  q.push({ t: 42, type: "poop" });
+  q.sort((a,b)=>a.t-b.t);
+  game.spawnQueue = q;
+}
+
+// Stage 2：ウンチの王（前任が出会った王）。通路変化直後にボス
+function buildSpawnQueueStage2() {
+  const q = [];
+  for (let i = 0; i < 5; i++) q.push({ t: 1 + i * 1.8, type: "roach" });
+  q.push({ t: 3,  type: "poop"  });
+  q.push({ t: 7,  type: "child" });
+  q.push({ t: 10, type: "poop"  });
+  q.push({ t: 13, type: "child" });
+  q.push({ t: 17, type: "poop"  });
+  q.push({ t: 25, type: "poopking" }); // ★ 通路変更直後にボス
+  // 残党（ボス撃破でスキップされる）
+  for (let i = 0; i < 4; i++) q.push({ t: 33 + i * 2, type: "roach" });
+  q.push({ t: 38, type: "poop"  });
+  q.push({ t: 42, type: "child" });
+  q.sort((a,b)=>a.t-b.t);
+  game.spawnQueue = q;
+}
+
+// Stage 3：クライマックス。汚染の主（人類の怠惰の集合体）。通路変更直後にボス
+function buildSpawnQueueStage3() {
+  const q = [];
+  for (let i = 0; i < 6; i++) q.push({ t: 1 + i * 1.4, type: "roach" });
+  q.push({ t: 4,  type: "poop"  });
+  q.push({ t: 6,  type: "child" });
+  q.push({ t: 9,  type: "poop"  });
+  q.push({ t: 12, type: "child" });
+  q.push({ t: 16, type: "poop"  });
+  q.push({ t: 19, type: "child" });
+  q.push({ t: 25, type: "boss" }); // ★ Stage3 最終ボス：汚染の主
+  for (let i = 0; i < 4; i++) q.push({ t: 32 + i * 1.8, type: "roach" });
+  q.push({ t: 38, type: "poop"  });
+  q.sort((a,b)=>a.t-b.t);
+  game.spawnQueue = q;
+}
+
+function spawnEnemy(type, pathIdx) {
+  if (pathIdx == null) {
+    pathIdx = game.nextPathIdx;
+    game.nextPathIdx = 1 - game.nextPathIdx;
+  }
+  const def = ENEMY_DEFS[type];
+  const px = pathPx(pathIdx);
+  game.enemies.push({
+    type, def, pathIdx,
+    hp: def.hp, maxHp: def.hp,
+    x: px[0].x + 4, y: px[0].y,
+    seg: 0, knock: 0, contamAcc: 0, slowMul: 1,
+    wobble: Math.random() * Math.PI * 2,
+    hitFlash: 0,
+  });
+  // 初遭遇のセリフ（boss は降臨演出側で扱う）
+  if (game.seenEnemy && !game.seenEnemy[type] && type !== "boss") {
+    game.seenEnemy[type] = true;
+    const line = type === "roach"    ? STORY_LINES.enemy_roach
+              : type === "poop"      ? STORY_LINES.enemy_poop
+              : type === "child"     ? STORY_LINES.enemy_child
+              : null;
+    if (line) queueStory(line, 4.0);
+  }
+}
+
+// ---------- パーティクル ----------
+function burst(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 14 + Math.random() * 34;
+    game.particles.push({
+      x, y,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      life: 0.28 + Math.random() * 0.28,
+      maxLife: 0.56,
+      size: 1 + Math.random() * 2,
+      color,
+    });
+  }
+}
+
+// ───────── ゲーム停止式ダイアログ ─────────
+// scenes: [{who, text, emo?}]
+// onDone: 終了後に呼ぶコールバック（パス切替や mode 戻し）
+function showDialog(scenes, onDone) {
+  if (!scenes || scenes.length === 0) { if (onDone) onDone(); return; }
+  game._modeBeforeDialog = game.mode;
+  game.dialogQueue = scenes;
+  game.dialogIdx = 0;
+  game.dialogT = 0;
+  game.dialogReturn = onDone;
+  game.mode = "dialog";
+}
+function advanceDialog() {
+  if (!game || game.mode !== "dialog") return;
+  // タイプライタ中ならまず全文表示（VN標準）
+  const cur = (game.dialogQueue || [])[game.dialogIdx];
+  if (cur) {
+    const charPerSec = 32;
+    const fullDur = (cur.text || "").length / charPerSec;
+    if ((game.dialogT || 0) < fullDur) {
+      game.dialogT = fullDur + 0.05;
+      return;
+    }
+  }
+  // 次のセリフ／終了
+  if (game.dialogIdx < (game.dialogQueue || []).length - 1) {
+    game.dialogIdx += 1;
+    game.dialogT = 0;
+    return;
+  }
+  game.mode = game._modeBeforeDialog || "playing";
+  const cb = game.dialogReturn;
+  game.dialogReturn = null;
+  game.dialogQueue = null;
+  if (cb) cb();
+}
+
+function advancePrologue() {
+  if (!game) return;
+  if (game.mode !== "prologue") return;
+  const cur = PROLOGUE_SCENES[game.proIdx];
+  if (cur && cur.kind === "cta") { game.mode = "title"; _prologueSeen = true; return; }
+  game.proIdx += 1;
+  game.proT = 0;
+  if (game.proIdx >= PROLOGUE_SCENES.length) { game.mode = "title"; _prologueSeen = true; }
+}
+
+function showStory(t, dur) {
+  game.story = (typeof t === "string") ? { speaker:"", text:t } : (t || { speaker:"", text:"" });
+  game.storyT = dur;
+  game.storyMax = dur;
+}
+function flashMsg(s, t) { game.msg = s; game.msgT = t; }
+
+// ---------- 入力 ----------
+canvas.addEventListener("mousedown", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const sx = (e.clientX - rect.left) * (W / rect.width);
+  const sy = (e.clientY - rect.top)  * (H / rect.height);
+  handleClick(sx, sy);
+});
+window.addEventListener("keydown", (e) => {
+  if (game.mode === "prologue") {
+    if (e.key === "Escape") { game.mode = "title"; _prologueSeen = true; e.preventDefault(); return; }
+    if (e.key === " " || e.key === "Enter") { advancePrologue(); e.preventDefault(); return; }
+    return;
+  }
+  if (game.mode === "kamishibai_end") {
+    if (e.key === "Escape" || e.key === " " || e.key === "Enter") { advanceEnding(); e.preventDefault(); return; }
+    return;
+  }
+  if (game.mode === "dialog") {
+    if (e.key === " " || e.key === "Enter") { advanceDialog(); e.preventDefault(); return; }
+    return;
+  }
+  if (e.key === "r" || e.key === "R") { newGame(true); return; }
+  if (game.mode !== "playing") return;
+  if (e.key === "Escape") { if (game.movingTower) { flashMsg("移動キャンセル", 0.8); game.movingTower = null; } return; }
+  if (e.key === "1") { game.selected = "toilet";  game.movingTower = null; }
+  if (e.key === "2") { game.selected = "sink";    game.movingTower = null; }
+  if (e.key === "3") { game.selected = "paper";   game.movingTower = null; }
+  if (e.key === "4") { game.selected = "plunger"; game.movingTower = null; }
+});
+
+canvas.addEventListener("mousemove", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const sx = (e.clientX - rect.left) * (W / rect.width);
+  const sy = (e.clientY - rect.top)  * (H / rect.height);
+  game.hover.x = sx; game.hover.y = sy;
+  game.hover.tx = Math.floor(sx / TILE);
+  game.hover.ty = Math.floor((sy - PLAY_TOP) / TILE);
+  game.hover.on = sy >= PLAY_TOP && sy < PLAY_BOTTOM
+    && game.hover.tx >= 0 && game.hover.tx < MAP_W
+    && game.hover.ty >= 0 && game.hover.ty < PLAY_H_TILES;
+});
+canvas.addEventListener("mouseleave", () => { game.hover.on = false; });
+
+function towerAt(tx, ty) {
+  return game.towers.find(t => t.tx === tx && t.ty === ty) || null;
+}
+
+function handleClick(x, y) {
+  // 任意のクリックでオーディオ初期化（ブラウザのautoplay制限対策）
+  if (!_audioStarted) { initAudio(); _audioStarted = true; if (game && game.mode === "prologue") music_play("title"); }
+
+  // ★ スキップボタン判定（紙芝居・ダイアログ・エンディング共通：右上）
+  // 内部解像度 320×240 のうち、x∈[260,316] y∈[2,18]
+  if ((game.mode === "prologue" || game.mode === "dialog" || game.mode === "kamishibai_end")
+      && x >= 260 && x <= 316 && y >= 2 && y <= 18) {
+    if (game.mode === "prologue") {
+      _prologueSeen = true;
+      game.mode = "title";
+      return;
+    }
+    if (game.mode === "dialog") {
+      // ダイアログ全体スキップ：ループで advanceDialog を呼んで終了
+      let safety = 64;
+      while (game.mode === "dialog" && safety-- > 0) advanceDialog();
+      return;
+    }
+    if (game.mode === "kamishibai_end") {
+      // エンディングは最終ページに飛ばす→クリックでタイトルへ
+      const list = ENDING_SCENES[game.endKind] || [];
+      game.endIdx = Math.max(0, list.length - 1);
+      game.endT = 0;
+      return;
+    }
+  }
+
+  if (game.mode === "prologue") { advancePrologue(); return; }
+  if (game.mode === "kamishibai_end") { advanceEnding(); return; }
+  if (game.mode === "dialog") { advanceDialog(); return; }
+  if (game.mode === "title") { startPlay(); return; }
+  if (game.mode === "ended") { newGame(true); return; }
+  // playing
+  if (y >= PLAY_BOTTOM) {
+    const slot = Math.floor(x / 80);
+    if (slot >= 0 && slot < 4) { game.selected = TOWER_KEYS[slot]; game.movingTower = null; }
+    return;
+  }
+  if (y < PLAY_TOP) return;
+
+  const tx = Math.floor(x / TILE);
+  const ty = Math.floor((y - PLAY_TOP) / TILE);
+  if (tx < 0 || tx >= MAP_W || ty < 0 || ty >= PLAY_H_TILES) return;
+
+  const existing = towerAt(tx, ty);
+
+  // ★ 移動モード中：別マスへ移動 / 別塔へ切替 / 同塔クリックで取消
+  if (game.movingTower) {
+    if (existing === game.movingTower) {
+      game.movingTower = null;
+      flashMsg("移動キャンセル", 0.8);
+      return;
+    }
+    if (existing) {
+      game.movingTower = existing;
+      game.selected = existing.type;
+      flashMsg(`${existing.def.name}を持ち上げた`, 1.0);
+      return;
+    }
+    if (pathTiles.has(ty * MAP_W + tx)) { flashMsg("通路には置けない", 1.0); return; }
+    const t = game.movingTower;
+    const oldCx = t.cx, oldCy = t.cy;
+    const newCx = tx * TILE + TILE / 2;
+    const newCy = PLAY_TOP + ty * TILE + TILE / 2;
+    t.tx = tx; t.ty = ty;
+    // ★ 瞬間移動はやめて、moveAnim.t で時間をかけて補間
+    t.moveAnim = { fromX: oldCx, fromY: oldCy, toX: newCx, toY: newCy, t: 0, dur: 1.6 };
+    t.cx = oldCx; t.cy = oldCy; // 開始位置はまだ旧位置のまま
+    // 移動後はしばらく機能停止
+    const MOVE_LOCK = 2.0;
+    t.cd = Math.max(t.cd, MOVE_LOCK);
+    t.cleanCd = Math.max(t.cleanCd, MOVE_LOCK);
+    t.moveLockT = MOVE_LOCK;
+    t.moveLockMax = MOVE_LOCK;
+    t.attackFlash = 0;
+    t.aimX = t.cx; t.aimY = t.cy;
+    burst(oldCx, oldCy, t.def.color, 10);
+    burst(t.cx, t.cy, t.def.color, 10);
+    sfx("place");
+    flashMsg("設置中… 約2秒で再稼働", 1.5);
+    game.movingTower = null;
+    return;
+  }
+
+  // 既存の塔をクリック → 移動モード開始
+  if (existing) {
+    game.movingTower = existing;
+    game.selected = existing.type;
+    flashMsg("移動先の床マスをクリック (ESCで取消)", 1.6);
+    return;
+  }
+
+  if (pathTiles.has(ty * MAP_W + tx)) { flashMsg("通路に置くな（張り紙参照）", 1.0); return; }
+  const def = TOWER_DEFS[game.selected];
+  if (game.coins < def.cost) { flashMsg("予算オーバー", 1.0); return; }
+  game.coins -= def.cost;
+  sfx("place");
+  const cx = tx * TILE + TILE/2, cy = PLAY_TOP + ty * TILE + TILE/2;
+  game.towers.push({
+    type: game.selected, def, tx, ty, cx, cy,
+    cd: 0, cleanCd: 0,
+    hp: def.hp, maxHp: def.hp,
+    attackFlash: 0, bob: Math.random() * Math.PI * 2,
+    aimX: cx, aimY: cy,
+    hitFlash: 0,
+  });
+  burst(cx, cy, "#ffffff", 8);
+}
+
+// ---------- 更新 ----------
+function update(dt) {
+  if (game.mode === "prologue") {
+    game.proT += dt;
+    const sc = PROLOGUE_SCENES[game.proIdx];
+    if (sc && sc.kind !== "cta" && game.proT >= sc.dur) {
+      game.proIdx += 1; game.proT = 0;
+      if (game.proIdx >= PROLOGUE_SCENES.length) { game.mode = "title"; _prologueSeen = true; }
+    }
+    return;
+  }
+  if (game.mode === "kamishibai_end") {
+    game.endT += dt;
+    const list = ENDING_SCENES[game.endKind] || [];
+    const sc = list[game.endIdx];
+    if (sc && !(sc.kind === "title" && sc.dur >= 90) && game.endT >= sc.dur) {
+      game.endIdx += 1; game.endT = 0;
+    }
+    return;
+  }
+  if (game.mode === "dialog") {
+    // ゲーム時間は止める。ダイアログのタイマーだけ進める
+    game.dialogT = (game.dialogT || 0) + dt;
+    return;
+  }
+  if (game.mode !== "playing") return;
+  game.t += dt;
+  game.stageT += dt;
+  game.msgT = Math.max(0, game.msgT - dt);
+  game.storyT = Math.max(0, game.storyT - dt);
+  game.flash = Math.max(0, game.flash - dt);
+  if (game.bossIntroT) game.bossIntroT = Math.max(0, game.bossIntroT - dt);
+  if (game.bossKillT) game.bossKillT = Math.max(0, game.bossKillT - dt);
+  // 物語キューが残っていて、現在のバナーが終わったら次へ
+  if (game.storyT <= 0 && game.storyQueue && game.storyQueue.length > 0) {
+    const nx = game.storyQueue.shift();
+    showStory(nx.payload, nx.dur);
+  }
+
+  // ★ 次のボスを検知。出現時刻直前にゲームを停止して pre→in ダイアログを再生
+  const nextBoss = game.spawnQueue[0] && ENEMY_DEFS[game.spawnQueue[0].type] && ENEMY_DEFS[game.spawnQueue[0].type].boss
+    ? game.spawnQueue[0] : null;
+  if (nextBoss && !game.bossPreFired && nextBoss.t - game.stageT <= 0.05) {
+    game.bossPreFired = true;
+    const stageNum = game.stage;
+    const preKey = `stage${stageNum}_boss_pre`;
+    const inKey  = `stage${stageNum}_boss_in`;
+    showDialog(DIALOG[preKey] || [], () => {
+      // pre終了後、ボスを出現させる + in ダイアログ（その後にプレイ再開）
+      const s = game.spawnQueue.shift();
+      const pathIdx = Math.random() < 0.5 ? 0 : 1;
+      spawnEnemy(s.type, pathIdx);
+      sfx("boss");
+      const def = ENEMY_DEFS[s.type];
+      flashMsg(`${def.name} 降臨！`, 2.4);
+      game.flash = Math.max(game.flash, 0.55);
+      game.bossIntroT = 2.0;
+      game.bossIntroMax = 2.0;
+      game.bossIntroPath = pathIdx;
+      game.bossIntroName = def.name;
+      game.bossIntroType = s.type;
+      const px = pathPx(pathIdx);
+      const c1 = s.type === "poopking" ? "#3a1f10" : s.type === "bratboss" ? "#4a3618" : "#4a2317";
+      const c2 = s.type === "poopking" ? "#a06030" : s.type === "bratboss" ? "#d6b34a" : "#a02020";
+      burst(px[0].x, px[0].y, c1, 32);
+      burst(px[0].x, px[0].y, c2, 22);
+      // 出現直後の会話 → 終わったら playing
+      showDialog(DIALOG[inKey] || [], () => { game.mode = "playing"; });
+    });
+  }
+
+  // 通常スポーン（ボスが既に処理済みの場合は飛ばさない＝先頭が roach 等）
+  while (game.spawnQueue.length && game.spawnQueue[0].t <= game.stageT) {
+    const s0 = game.spawnQueue[0];
+    if (ENEMY_DEFS[s0.type] && ENEMY_DEFS[s0.type].boss) break; // ボスは pre ダイアログで処理
+    const s = game.spawnQueue.shift();
+    spawnEnemy(s.type, null);
+  }
+
+  // 敵の slowMul を毎フレーム再計算
+  for (const e of game.enemies) e.slowMul = 1;
+  for (const t of game.towers) {
+    if (t.type !== "sink") continue;
+    const r2 = t.def.range * t.def.range;
+    for (const e of game.enemies) {
+      if (e.hp <= 0) continue;
+      const dx = e.x - t.cx, dy = e.y - t.cy;
+      if (dx*dx + dy*dy <= r2) e.slowMul = Math.min(e.slowMul, t.def.slow);
+    }
+  }
+
+  // 敵の更新（移動・汚染・到達判定）
+  for (const e of game.enemies) {
+    if (e.hp <= 0) continue;
+    const tx = Math.floor(e.x / TILE);
+    const ty = Math.floor((e.y - PLAY_TOP) / TILE);
+    const tc = getContam(tx, ty);
+    let boost = 1;
+    if (tc >= 80) boost = 1.4;
+    else if (tc >= 50) boost = 1.2;
+
+    const speed = e.def.speed * e.slowMul * boost;
+    let move = speed * dt;
+
+    // 紙の縛りタイマーを減衰
+    if (e.snareT && e.snareT > 0) e.snareT = Math.max(0, e.snareT - dt);
+    const snared = (e.snareT && e.snareT > 0);
+
+    if (e.knock > 0) {
+      const knockSpeed = e.def.boss ? e.def.speed * 0.25 : e.def.speed * 0.8;
+      const back = Math.min(e.knock, knockSpeed * dt);
+      e.knock -= back;
+      moveAlongPath(e, -back);
+    } else if (!snared) {
+      moveAlongPath(e, move);
+    }
+    // 縛られている間も汚染を撒くが、量は減らす（その場でジタバタする程度）
+    // （contam処理は後段）
+
+    e.wobble += dt * (e.type === "child" ? 11 : e.type === "roach" ? 15 : (e.def && e.def.boss) ? 5 : 7);
+    e.hitFlash = Math.max(0, e.hitFlash - dt * 5);
+
+    e.contamAcc += dt;
+    if (e.contamAcc >= 0.25) {
+      e.contamAcc = 0;
+      addContamSpread(tx, ty, e.def.contam * 0.25);
+    }
+
+    if (e.seg >= PATHS[e.pathIdx].length - 1) {
+      // ゴール到達：消えずにその場で滞留して継続ダメージ
+      if (!e.atGoal) {
+        e.atGoal = true;
+        e.goalAcc = 0.0;
+        game.hp -= 1;
+        game.flash = 0.5;
+        sfx("hpLoss");
+        burst(e.x, e.y, "#7a421e", 8);
+      } else {
+        e.goalAcc += dt;
+        // 居座りの継続ダメージ頻度（緩和：通常2.5秒/ボス1.5秒に1ダメージ）
+        const tick = (e.def && e.def.boss) ? 1.5 : 2.5;
+        if (e.goalAcc >= tick) {
+          e.goalAcc -= tick;
+          game.hp -= 1;
+          game.flash = Math.max(game.flash, 0.30);
+          sfx("hpLoss");
+          // ゴールでも揺れる（停滞してるが死んではいない）
+          burst(e.x, e.y, "#7a421e", 3);
+        }
+      }
+    }
+  }
+
+  // ★ ボスの遠距離射撃（最も近い塔へ）
+  for (const e of game.enemies) {
+    if (e.hp <= 0 || !e.def || !e.def.boss || !e.def.shootCd) continue;
+    e.shootCdT = (e.shootCdT || 0) - dt;
+    if (e.shootCdT > 0) continue;
+    // 範囲内の最寄り塔を探す
+    let best = null, bestD = Infinity;
+    const r2 = e.def.shootRange * e.def.shootRange;
+    for (const t of game.towers) {
+      if (t.hp <= 0) continue;
+      const dx = t.cx - e.x, dy = t.cy - e.y;
+      const d2 = dx*dx + dy*dy;
+      if (d2 <= r2 && d2 < bestD) { best = t; bestD = d2; }
+    }
+    if (!best) continue;
+    e.shootCdT = e.def.shootCd;
+    const sd = Math.sqrt(bestD) || 1;
+    const speed = 90;
+    game.enemyShots.push({
+      x: e.x, y: e.y,
+      vx: (best.cx - e.x) / sd * speed,
+      vy: (best.cy - e.y) / sd * speed,
+      target: best,
+      dmg: e.def.shootDmg,
+      color: e.def.shootColor || "#3a1f10",
+      life: 1.6,
+    });
+    sfx("splash");
+  }
+  // 敵弾の更新＋当たり判定
+  for (const s of game.enemyShots || []) {
+    s.x += s.vx * dt; s.y += s.vy * dt;
+    s.life -= dt;
+    if (!s.target || s.target.hp <= 0) { s.life = 0; continue; }
+    const dx = s.target.cx - s.x, dy = s.target.cy - s.y;
+    if (dx*dx + dy*dy < 9*9) {
+      s.target.hp -= s.dmg;
+      s.target.hitFlash = 1;
+      burst(s.target.cx, s.target.cy, s.color, 6);
+      s.life = 0;
+    }
+  }
+  game.enemyShots = (game.enemyShots || []).filter(s => s.life > 0);
+
+  // ★ 敵が近くの塔を攻撃（味方が壊れる）
+  // ボスは auraR / auraDps を持ち、広範囲で塔を継続的に削る
+  const DEFAULT_R2 = 20 * 20;
+  for (const e of game.enemies) {
+    if (e.hp <= 0) continue;
+    const r = e.def.auraR || 20;
+    const r2 = r * r;
+    const dmgContact = e.def.towerDmg * dt;
+    const dmgAura = (e.def.auraDps || 0) * dt;
+    for (const t of game.towers) {
+      if (t.hp <= 0) continue;
+      const dx = t.cx - e.x, dy = t.cy - e.y;
+      const d2 = dx*dx + dy*dy;
+      // オーラ範囲：継続的に削る
+      if (d2 <= r2 && dmgAura > 0) {
+        t.hp -= dmgAura;
+        t.hitFlash = Math.max(t.hitFlash, 0.6);
+      }
+      // 接触範囲：従来の towerDmg
+      if (d2 <= DEFAULT_R2) {
+        t.hp -= dmgContact;
+        t.hitFlash = 1;
+      }
+      if (t.hp <= 0) {
+        burst(t.cx, t.cy, "#ffd166", 18);
+        burst(t.cx, t.cy, t.def.color, 12);
+      }
+    }
+  }
+  // 壊れた塔を除去
+  game.towers = game.towers.filter(t => t.hp > 0);
+
+  // 塔の更新（攻撃・清掃）
+  for (const t of game.towers) {
+    t.cd = Math.max(0, t.cd - dt);
+    t.cleanCd = Math.max(0, t.cleanCd - dt);
+    t.attackFlash = Math.max(0, t.attackFlash - dt * 4);
+    t.hitFlash = Math.max(0, t.hitFlash - dt * 3);
+    t.bob += dt * 1.6;
+    if (t.moveLockT) t.moveLockT = Math.max(0, t.moveLockT - dt);
+    // 移動アニメーション（瞬間移動の代わり）
+    if (t.moveAnim) {
+      t.moveAnim.t += dt;
+      const k = Math.min(1, t.moveAnim.t / t.moveAnim.dur);
+      // ease-in-out
+      const ek = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+      t.cx = t.moveAnim.fromX + (t.moveAnim.toX - t.moveAnim.fromX) * ek;
+      t.cy = t.moveAnim.fromY + (t.moveAnim.toY - t.moveAnim.fromY) * ek;
+      t.aimX = t.cx; t.aimY = t.cy;
+      if (k >= 1) { t.cx = t.moveAnim.toX; t.cy = t.moveAnim.toY; t.moveAnim = null; }
+    }
+
+    if (t.type === "toilet") {
+      if (t.cd <= 0) {
+        const target = findEnemyInRange(t.cx, t.cy, t.def.range);
+        if (target) {
+          t.cd = t.def.cd;
+          t.attackFlash = 1;
+          t.aimX = target.x; t.aimY = target.y;
+          game.shots.push({
+            kind: "toilet", x: t.cx, y: t.cy, tx: target.x, ty: target.y, target,
+            dmg: t.def.dmg, life: 0.3, lifeMax: 0.3, color: "#a8d8ff", knock: 0,
+          });
+        }
+      }
+    } else if (t.type === "plunger") {
+      if (t.cd <= 0) {
+        const target = findEnemyInRange(t.cx, t.cy, t.def.range);
+        if (target) {
+          t.cd = t.def.cd;
+          t.attackFlash = 1;
+          t.aimX = target.x; t.aimY = target.y;
+          game.shots.push({
+            kind: "plunger", x: t.cx, y: t.cy, tx: target.x, ty: target.y, target,
+            dmg: t.def.dmg, life: 0.3, lifeMax: 0.3, color: "#ff8066", knock: t.def.knock,
+          });
+        }
+      }
+    } else if (t.type === "paper") {
+      if (t.cleanCd <= 0) {
+        t.cleanCd = 0.2;
+        if (Math.random() < 0.45) sfx("clean");
+        t.attackFlash = 1;
+        const r = t.def.radius;
+        const amt = t.def.clean;
+        // ★ 範囲内の敵を紙で縛る（snareT を更新）
+        const rPx = r * TILE;
+        const rPx2 = rPx * rPx;
+        for (const e of game.enemies) {
+          if (e.hp <= 0) continue;
+          const dxe = e.x - t.cx, dye = e.y - t.cy;
+          if (dxe*dxe + dye*dye <= rPx2) {
+            e.snareT = Math.max(e.snareT || 0, t.def.snareDur || 0.7);
+          }
+        }
+        let cleaned = 0;
+        // 個々のタイルに「光ったマーカー」を残して可視化
+        if (!game.cleanFx) game.cleanFx = [];
+        for (let dy = -r; dy <= r; dy++) {
+          for (let dx = -r; dx <= r; dx++) {
+            if (dx*dx + dy*dy > r*r) continue;
+            const ntx = t.tx + dx, nty = t.ty + dy;
+            if (ntx < 0 || ntx >= MAP_W || nty < 0 || nty >= PLAY_H_TILES) continue;
+            const c = getContam(ntx, nty);
+            if (c > 0) {
+              setContam(ntx, nty, c - amt);
+              cleaned += Math.min(c, amt);
+              // 清掃された各タイルを白く光らせる（短命）
+              game.cleanFx.push({ tx:ntx, ty:nty, life:0.55, max:0.55 });
+            }
+          }
+        }
+        // 紙吹雪は cleaned 量に比例して多めに撒く
+        const sparkles = cleaned > 0 ? 8 : 2;
+        for (let i = 0; i < sparkles; i++) {
+          const ang = Math.random() * Math.PI * 2;
+          const d = Math.random() * r * TILE * 0.85;
+          game.particles.push({
+            x: t.cx + Math.cos(ang) * d,
+            y: t.cy + Math.sin(ang) * d,
+            vx: (Math.random() - 0.5) * 18,
+            vy: -14 - Math.random() * 18,
+            life: 0.45 + Math.random() * 0.30,
+            maxLife: 0.75,
+            size: 1.8 + Math.random() * 2.0,
+            color: cleaned > 0 ? "#fff8d8" : "#dadce0",
+          });
+        }
+        // 「-数字」のテキストポップ（清掃量を数字で見える化）
+        if (cleaned > 0) {
+          game.particles.push({
+            x: t.cx, y: t.cy - 14,
+            vx: 0, vy: -22,
+            life: 0.65, maxLife: 0.65,
+            size: 9, color: "#b8f2ad",
+            text: `−${Math.round(cleaned)}`,
+          });
+        }
+      }
+    }
+  }
+
+  // 弾
+  for (const s of game.shots) {
+    s.life -= dt;
+    if (s.life <= 0 && s.target && s.target.hp > 0) {
+      const willDie = s.target.hp - s.dmg <= 0;
+      s.target.hp -= s.dmg;
+      s.target.hitFlash = 1;
+      if (willDie) sfx("kill"); else sfx("shoot");
+      if (s.knock > 0) {
+        // ボスごとに knockResist で減衰（ガキ大将はほぼ無効）
+        const resist = (s.target.def && s.target.def.knockResist != null)
+          ? s.target.def.knockResist
+          : (s.target.def && s.target.def.boss ? 0.25 : 1.0);
+        const k = s.knock * resist;
+        s.target.knock = Math.max(s.target.knock, k);
+      }
+      burst(s.target.x, s.target.y, s.color, 5);
+    }
+  }
+  game.shots = game.shots.filter(s => s.life > 0);
+
+  // パーティクル
+  for (const p of game.particles) {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += 22 * dt;
+    p.life -= dt;
+  }
+  game.particles = game.particles.filter(p => p.life > 0);
+  // 紙の清掃エフェクト（タイル単位の白光）の寿命
+  if (game.cleanFx) {
+    for (const f of game.cleanFx) f.life -= dt;
+    game.cleanFx = game.cleanFx.filter(f => f.life > 0);
+  }
+
+  for (const e of game.enemies) {
+    if (e.hp <= 0 && !e.counted) {
+      e.counted = true;
+      const isBoss = e.def && e.def.boss;
+      // ボスはゴール居座り中に倒しても撃破扱い（ステージ進行を保証）
+      if (e.seg < PATHS[e.pathIdx].length - 1 || isBoss) {
+        game.coins += e.def.reward;
+        burst(e.x, e.y, e.def.color, 10);
+        if (isBoss) {
+          sfx("bossKill");
+          sfx("win");
+          game.bossKills = (game.bossKills || 0) + 1;
+          game.bossKillT = 2.6;
+          game.bossKillMax = 2.6;
+          game.bossKillX = e.x; game.bossKillY = e.y;
+          game.bossKillName = e.def.name;
+          game.flash = Math.max(game.flash, 0.55);
+          burst(e.x, e.y, "#ffd86b", 60);
+          burst(e.x, e.y, "#ffffff", 36);
+          burst(e.x, e.y, "#a0e8ff", 24);
+          burst(e.x, e.y, "#b8f2ad", 18);
+          flashMsg(`${e.def.name} 撃破！`, 3.5);
+          // 撃破ダイアログ → ステージクリア → 次ステージ or 勝利
+          const killKey = `stage${game.stage}_boss_kill`;
+          const dlg = DIALOG[killKey] || [];
+          const stageNum = game.stage;
+          setTimeout(() => {
+            if (!game) return;
+            showDialog(dlg, () => { advanceAfterBossKill(stageNum); });
+          }, 1100);
+        }
+      }
+    }
+  }
+  game.enemies = game.enemies.filter(e => e.hp > 0);
+
+  // Stage2 入口の汚染源
+  if (game.stage === 2) {
+    game.entryContamAcc += dt;
+    if (game.entryContamAcc >= 0.5) {
+      game.entryContamAcc = 0;
+      for (const PATH of PATHS) {
+        const ep = PATH[0];
+        setContam(ep.tx, ep.ty, getContam(ep.tx, ep.ty) + 0.32);
+        setContam(ep.tx - 1, ep.ty, getContam(ep.tx - 1, ep.ty) + 0.13);
+        setContam(ep.tx, ep.ty + 1, getContam(ep.tx, ep.ty + 1) + 0.13);
+        setContam(ep.tx, ep.ty - 1, getContam(ep.tx, ep.ty - 1) + 0.13);
+      }
+    }
+  }
+
+  // Stage2 拡散
+  if (game.stage === 2 && Math.random() < dt * 0.45) {
+    const tx = (Math.random() * MAP_W) | 0;
+    const ty = (Math.random() * PLAY_H_TILES) | 0;
+    const c = getContam(tx, ty);
+    if (c > 5) {
+      const ndx = (Math.random() * 3 | 0) - 1;
+      const ndy = (Math.random() * 3 | 0) - 1;
+      setContam(tx + ndx, ty + ndy, getContam(tx + ndx, ty + ndy) + c * 0.15);
+    }
+  }
+
+  // 勝敗判定
+  const ac = avgContam();
+  // 軽いプレイ中バナー（戦況メモ＋日記の断片。pause しない）
+  if (game.stage === 1) {
+    if (!game.stage1WarnFired && (ac >= 22 || game.stageT >= 20)) { game.stage1WarnFired = true; queueStory(STORY_LINES.stage1_warn, 4.0); }
+    if (!game.storyDiary1Fired && game.stageT >= 32) { game.storyDiary1Fired = true; queueStory(STORY_LINES.diary_1, 4.0); }
+  }
+  if (game.stage === 2) {
+    if (!game.stage2WarnFired && (ac >= 35 || game.stageT >= 18)) { game.stage2WarnFired = true; queueStory(STORY_LINES.stage2_warn, 4.0); }
+    if (!game.storyDiary2Fired && game.stageT >= 28) { game.storyDiary2Fired = true; queueStory(STORY_LINES.diary_2, 4.0); }
+  }
+  if (game.stage === 3) {
+    if (!game.stage3WarnFired && game.stageT >= 8) { game.stage3WarnFired = true; queueStory(STORY_LINES.stage3_warn, 4.0); }
+    if (!game.storyDiary3Fired && game.stageT >= 22) { game.storyDiary3Fired = true; queueStory(STORY_LINES.diary_3, 4.0); }
+  }
+  // ★ 中盤の通路変化（各ステージで1回、t=22.5）— ダイアログでゲームを停止
+  if (!game.pathChangedFired && game.stageT >= 22.5 && game.stage >= 1 && game.stage <= 3) {
+    game.pathChangedFired = true;
+    const dlg = DIALOG[`stage${game.stage}_path`];
+    if (dlg) {
+      const stageNum = game.stage;
+      showDialog(dlg, () => {
+        sfx("stagewipe");
+        setStagePaths(stageNum, "late");
+        flashMsg("通路が変化した", 1.6);
+        // 通路上の塔/敵は座標がズレるが、敵は次セグメントへ向かい続けるので問題ない
+      });
+    }
+  }
+  if (game.hp <= 0) endGame(false, "lose_hp");
+  else if (ac >= 100) endGame(false, "lose_contam");
+  // ★ ステージ遷移は「ボス撃破時に advanceAfterBossKill() が呼ぶ」のみ。時間切れ遷移は廃止。
+}
+
+// ボス撃破後にステージを進める（または最終勝利）
+function advanceAfterBossKill(stageNum) {
+  // 残党をすべて流す
+  for (const e of game.enemies) { burst(e.x, e.y, "#7a421e", 6); e.hp = 0; e.counted = true; }
+  game.shots = [];
+  if (stageNum >= 3) {
+    endGame(true);
+    return;
+  }
+  // 次ステージへ
+  sfx("stagewipe");
+  game.stage = stageNum + 1;
+  game.stageT = 0;
+  setStagePaths(game.stage, "early");
+  game.pathChangedFired = false;
+  game.bossPreFired = false;
+  flashMsg(`Stage ${game.stage}`, 2.4);
+  if (game.stage === 2) { buildSpawnQueueStage2(); music_play("stage2"); showDialog(DIALOG.stage2_intro, () => { game.mode = "playing"; }); game.coins += 30; }
+  else if (game.stage === 3) { buildSpawnQueueStage3(); music_play("stage3"); showDialog(DIALOG.stage3_intro, () => { game.mode = "playing"; }); game.coins += 40; }
+}
+
+function endGame(won, reason) {
+  game.won = won;
+  game.endReason = reason;
+  game.storyQueue = [];
+  music_play(won ? "win" : "lose");
+  const kind = won ? "win" : (reason === "lose_contam" ? "lose_contam" : "lose_hp");
+  // ① キャラ会話（pause-dialog）→ ② 紙芝居エンディング
+  const finalDialog = DIALOG[kind];
+  const goKamishibai = () => {
+    game.mode = "kamishibai_end";
+    game.endIdx = 0;
+    game.endT = 0;
+    game.endKind = kind;
+  };
+  if (finalDialog && finalDialog.length) {
+    showDialog(finalDialog, goKamishibai);
+  } else {
+    goKamishibai();
+  }
+}
+function advanceEnding() {
+  if (!game || game.mode !== "kamishibai_end") return;
+  const list = ENDING_SCENES[game.endKind] || [];
+  const cur = list[game.endIdx];
+  if (cur && cur.kind === "title" && cur.dur >= 90) {
+    // 最終ページ：再挑戦／タイトルへ
+    if (game.won) { _prologueSeen = true; newGame(true); }
+    else { newGame(true); }
+    return;
+  }
+  game.endIdx += 1;
+  game.endT = 0;
+  if (game.endIdx >= list.length) {
+    // セーフティ：全て見終えたら戻す
+    if (game.won) { _prologueSeen = true; newGame(true); }
+    else { newGame(true); }
+  }
+}
+
+function addContamSpread(tx, ty, amount) {
+  const cells = [
+    [tx, ty, 1.0],
+    [tx-1, ty, 0.35], [tx+1, ty, 0.35],
+    [tx, ty-1, 0.35], [tx, ty+1, 0.35],
+  ];
+  for (const [x, y, w] of cells) setContam(x, y, getContam(x, y) + amount * w);
+}
+
+function moveAlongPath(e, move) {
+  const px = pathPx(e.pathIdx);
+  const path = PATHS[e.pathIdx];
+  while (move !== 0 && e.seg < path.length - 1) {
+    const a = px[e.seg], b = px[e.seg + 1];
+    const dx = b.x - e.x, dy = b.y - e.y;
+    const dist = Math.hypot(dx, dy);
+    if (move > 0) {
+      if (dist <= move) { e.x = b.x; e.y = b.y; move -= dist; e.seg++; }
+      else { e.x += dx / dist * move; e.y += dy / dist * move; move = 0; }
+    } else {
+      const back = -move;
+      if (e.seg === 0) {
+        const ax = px[0].x, ay = px[0].y;
+        const bdx = ax - e.x, bdy = ay - e.y;
+        const bd = Math.hypot(bdx, bdy);
+        if (bd <= back) { e.x = ax; e.y = ay; }
+        else { e.x += bdx/bd * back; e.y += bdy/bd * back; }
+        move = 0;
+      } else {
+        const prev = px[e.seg - 1];
+        const pdx = prev.x - e.x, pdy = prev.y - e.y;
+        const pd = Math.hypot(pdx, pdy);
+        if (pd <= back) {
+          e.x = prev.x; e.y = prev.y; e.seg--;
+          move += pd;
+          if (move >= 0) move = 0;
+        } else { e.x += pdx / pd * back; e.y += pdy / pd * back; move = 0; }
+      }
+    }
+  }
+}
+
+function findEnemyInRange(x, y, r) {
+  let best = null, bestSeg = -1;
+  const r2 = r * r;
+  for (const e of game.enemies) {
+    if (e.hp <= 0) continue;
+    const dx = e.x - x, dy = e.y - y;
+    if (dx*dx + dy*dy > r2) continue;
+    if (e.seg > bestSeg) { best = e; bestSeg = e.seg; }
+  }
+  return best;
+}
+
+// ---------- 描画ヘルパ ----------
+function roundedRect(x, y, w, h, r) {
+  const radius = Math.max(0, Math.min(r, Math.abs(w)/2, Math.abs(h)/2));
+  ctx.beginPath();
+  ctx.moveTo(x+radius, y);
+  ctx.lineTo(x+w-radius, y);
+  ctx.quadraticCurveTo(x+w, y, x+w, y+radius);
+  ctx.lineTo(x+w, y+h-radius);
+  ctx.quadraticCurveTo(x+w, y+h, x+w-radius, y+h);
+  ctx.lineTo(x+radius, y+h);
+  ctx.quadraticCurveTo(x, y+h, x, y+h-radius);
+  ctx.lineTo(x, y+radius);
+  ctx.quadraticCurveTo(x, y, x+radius, y);
+  ctx.closePath();
+  ctx.fill();
+}
+function text(value, x, y, color="#fff", size=10) {
+  ctx.font = `700 ${size}px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = "#0c0e12";
+  ctx.strokeText(value, x, y);
+  ctx.fillStyle = color;
+  ctx.fillText(value, x, y);
+}
+function tinyText(value, x, y, color="#fff") {
+  ctx.font = `700 8px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = color === "#40352a" ? "rgba(255,255,255,0.55)" : "#0c0e12";
+  ctx.strokeText(value, x, y);
+  ctx.fillStyle = color;
+  ctx.fillText(value, x, y);
+}
+function centerText(value, y, color="#fff", size=14) {
+  ctx.font = `800 ${size}px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "center";
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = "#0c0e12";
+  ctx.strokeText(value, W / 2, y);
+  ctx.fillStyle = color;
+  ctx.fillText(value, W / 2, y);
+  ctx.textAlign = "left";
+}
+
+// ---------- 描画 ----------
+function render() {
+  if (game.mode === "prologue") { drawPrologue(); return; }
+  if (game.mode === "kamishibai_end") { drawEndingKamishibai(); return; }
+  if (game.mode === "title") { drawTitleOverlay(); return; }
+  ctx.fillStyle = game.stage === 1 ? "#101820" : "#1a0e0e";
+  ctx.fillRect(0, 0, W, H);
+
+  drawField();
+  drawPathLines();
+  drawSigns();
+
+  // 紙タワーの常時射程リング（薄く）と清掃タイル光（タイル白オーバーレイ）
+  drawPaperRangeRings();
+  drawCleanTileFx();
+
+  for (const t of game.towers) drawTower(t);
+  drawPlacePreview();
+  drawMovePreview();
+  for (const e of game.enemies) drawEnemy(e);
+  for (const s of game.shots) drawShot(s);
+  // 敵弾（ボスの遠距離攻撃）
+  for (const s of game.enemyShots || []) {
+    ctx.fillStyle = s.color || "#3a1f10";
+    ctx.beginPath(); ctx.arc(s.x, s.y, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "rgba(255, 80, 60, 0.6)";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(s.x, s.y, 4 + Math.sin(performance.now()/80) * 0.6, 0, Math.PI * 2); ctx.stroke();
+  }
+  drawParticles();
+
+  if (game.flash > 0) {
+    ctx.fillStyle = `rgba(200,40,40,${game.flash})`;
+    ctx.fillRect(0, PLAY_TOP, W, PLAY_BOTTOM - PLAY_TOP);
+  }
+
+  drawCrisisEffects();
+  drawBossIntro();
+  drawBossKill();
+
+  drawTopHUD();
+  drawBottomHUD();
+  drawStoryBanner();
+  if (game.mode === "dialog") drawDialogOverlay();
+}
+
+// ダイアログのキャラ→画像（フレームインデックス）の対応
+function getDialogPortrait(who, emo) {
+  // 保健所は清掃班長の立ち絵を流用（フレーム/タグの色だけ別系統に）
+  if (who === "inspector" && PORTRAITS.clean && PORTRAITS.clean.complete) return PORTRAITS.clean;
+  // 立ち絵PNGが用意されているキャラを最優先（assets/portraits/port_<who>.png）
+  if (PORTRAITS[who] && PORTRAITS[who].complete && PORTRAITS[who].naturalWidth > 0) {
+    return PORTRAITS[who];
+  }
+  // 立ち絵が無いキャラ（前任の日記/保健所）はテキストアバター
+  // 緊急フォールバック：シートのフレーム
+  if (who === "brat") {
+    const arr = SPRITES.bratboss && SPRITES.bratboss.portraits;
+    if (arr && arr.length) return arr[Math.min(arr.length - 1, emo || 0)];
+  } else if (who === "king") {
+    const arr = SPRITES.poopking && SPRITES.poopking.portraits;
+    if (arr && arr.length) return arr[Math.min(arr.length - 1, emo || 0)];
+  } else if (who === "filth") {
+    const arr = SPRITES.boss && SPRITES.boss.frames;
+    if (arr && arr.length) return arr[Math.min(arr.length - 1, emo || 0)];
+  }
+  return null;
+}
+function dialogSpeakerName(who) {
+  return who === "clean"     ? "清掃班長"
+       : who === "rookie"    ? "新人"
+       : who === "diary"     ? "前任の日記"
+       : who === "brat"      ? "ガキ大将"
+       : who === "filth"     ? "汚染の主"
+       : who === "king"      ? "ウンチの王"
+       : who === "inspector" ? "保健所"
+       : "";
+}
+function dialogSpeakerColor(who) {
+  return who === "clean"     ? "#9ad8ff"
+       : who === "rookie"    ? "#b8f2ad"
+       : who === "diary"     ? "#d2b88a"
+       : who === "brat"      ? "#ffae5c"
+       : who === "filth"     ? "#d76b6b"
+       : who === "king"      ? "#c9a14a"
+       : who === "inspector" ? "#cccccc"
+       : "#f7f0dc";
+}
+
+// 共通スキップボタン（右上）
+function drawSkipButton() {
+  const x = 260, y = 2, w = 56, h = 16;
+  ctx.fillStyle = "rgba(20, 24, 32, 0.85)";
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = "rgba(255, 216, 107, 0.7)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  ctx.font = `800 9px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,0.95)";
+  ctx.strokeText("スキップ ▶▶", x + w / 2, y + h / 2);
+  ctx.fillStyle = "#ffd86b";
+  ctx.fillText("スキップ ▶▶", x + w / 2, y + h / 2);
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+}
+
+function drawDialogOverlay() {
+  const sc = (game.dialogQueue || [])[game.dialogIdx];
+  if (!sc) return;
+
+  // ━━━ シーンごとのタイマー ━━━
+  const elapsed = game.dialogT || 0;
+  // 立ち絵：登場(slide-in 0.25s) → 喋りバウンス(continuous)
+  const enterT = Math.min(1, elapsed / 0.25);
+  const enterEase = 1 - Math.pow(1 - enterT, 3);
+  // タイプライタ：1文字あたり0.04s（速め）。上限で全文表示
+  const fullText = sc.text || "";
+  const charPerSec = 32;
+  const shownChars = Math.min(fullText.length, Math.floor(elapsed * charPerSec));
+  const stillTyping = shownChars < fullText.length;
+  const shownText = fullText.substring(0, shownChars);
+
+  // 暗幕：ゲーム画面の上に半透明ベール
+  ctx.fillStyle = "rgba(4, 6, 10, 0.55)";
+  ctx.fillRect(0, 0, W, H);
+
+  // ダイアログボックス（縦にもっと広く取る）— 入場時に下から少しスライド
+  const boxX = 4, boxY = 96 + (1 - enterEase) * 26, boxW = W - 8, boxH = H - 4 - 96;
+  // 細い影
+  ctx.fillStyle = `rgba(0,0,0,${0.45 * enterEase})`;
+  ctx.fillRect(boxX + 2, boxY + 2, boxW, boxH);
+  ctx.fillStyle = `rgba(8, 10, 14, ${0.94 * enterEase})`;
+  ctx.fillRect(boxX, boxY, boxW, boxH);
+  ctx.strokeStyle = `rgba(255, 216, 107, ${0.85 * enterEase})`;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(boxX + 0.5, boxY + 0.5, boxW - 1, boxH - 1);
+  ctx.strokeStyle = `rgba(255, 216, 107, ${0.32 * enterEase})`;
+  ctx.strokeRect(boxX + 2.5, boxY + 2.5, boxW - 5, boxH - 5);
+
+  // ━━━ キャラ立ち絵（左側）— 入場で左からスライドイン＋喋りバウンス ━━━
+  const portrait = getDialogPortrait(sc.who, sc.emo);
+  const baseX = boxX + 8, baseY = boxY + 6, portW = 70, portH = 78;
+  // 入場時に左から
+  const slideInX = baseX - (1 - enterEase) * 40;
+  // タイプライタ進行中：縦バウンス＋わずかな水平揺れ
+  const bounceY = stillTyping ? Math.sin(performance.now() / 90) * 2.0 : 0;
+  const swayX  = stillTyping ? Math.sin(performance.now() / 130) * 0.8 : 0;
+  const portX = slideInX + swayX, portY = baseY + bounceY;
+
+  // 立ち絵の枠
+  ctx.save();
+  ctx.globalAlpha = enterEase;
+  ctx.fillStyle = "rgba(20, 28, 40, 0.96)";
+  ctx.fillRect(portX, portY, portW, portH);
+  ctx.strokeStyle = dialogSpeakerColor(sc.who);
+  ctx.lineWidth = stillTyping ? 1.5 : 1;
+  ctx.strokeRect(portX + 0.5, portY + 0.5, portW - 1, portH - 1);
+
+  if (portrait) {
+    const pw = portrait.naturalWidth || portrait.width;
+    const ph = portrait.naturalHeight || portrait.height;
+    if (pw && ph) {
+      const k = Math.min((portW - 6) / pw, (portH - 6) / ph);
+      // 喋ってる間はわずかにスケール脈動
+      const sc2 = stillTyping ? (1 + 0.04 * Math.sin(performance.now() / 110)) : 1;
+      const dw = Math.round(pw * k * sc2), dh = Math.round(ph * k * sc2);
+      ctx.drawImage(portrait, portX + (portW - dw) / 2, portY + (portH - dh) / 2, dw, dh);
+    }
+  } else {
+    const init = (sc.who === "clean" ? "班"
+               : sc.who === "rookie" ? "新"
+               : sc.who === "diary" ? "日"
+               : sc.who === "inspector" ? "保"
+               : "?");
+    ctx.fillStyle = dialogSpeakerColor(sc.who);
+    const fs = stillTyping ? 28 + Math.sin(performance.now() / 100) * 1.5 : 28;
+    ctx.font = `900 ${fs}px "Yu Gothic UI", Meiryo, sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(init, portX + portW / 2, portY + portH / 2);
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  }
+  ctx.restore();
+
+  // 名前タグ — 喋ってる間は色が脈動
+  const name = dialogSpeakerName(sc.who);
+  if (name) {
+    ctx.font = `800 9px "Yu Gothic UI", Meiryo, sans-serif`;
+    const nW = Math.ceil(ctx.measureText(name).width) + 12;
+    const namePulse = stillTyping ? (0.7 + 0.3 * Math.sin(performance.now()/180)) : 1;
+    ctx.fillStyle = `rgba(40, 22, 12, ${0.95 * enterEase})`;
+    ctx.fillRect(portX, portY + portH + 2, nW, 12);
+    ctx.strokeStyle = dialogSpeakerColor(sc.who);
+    ctx.lineWidth = 1;
+    ctx.strokeRect(portX + 0.5, portY + portH + 2.5, nW - 1, 11);
+    ctx.fillStyle = dialogSpeakerColor(sc.who);
+    ctx.globalAlpha = namePulse * enterEase;
+    ctx.textBaseline = "middle";
+    ctx.fillText(name, portX + 6, portY + portH + 8);
+    ctx.globalAlpha = 1;
+  }
+
+  // ━━━ 本文（右側）— 小さめフォント・大量表示 ━━━
+  const txX = baseX + portW + 10;
+  const txY = boxY + 10;
+  // 折返し幅をさらに拡大、フォント縮小、行数増
+  const lines = wrapJP(shownText, 40);
+  ctx.font = `700 11px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.textBaseline = "top"; ctx.textAlign = "left";
+  ctx.lineWidth = 3;
+  const isBossSpeaker = (sc.who === "brat" || sc.who === "filth" || sc.who === "king");
+  // 最大12行表示
+  for (let i = 0; i < Math.min(12, lines.length); i++) {
+    const y = txY + i * 13;
+    ctx.strokeStyle = `rgba(0,0,0,${enterEase})`;
+    ctx.strokeText(lines[i], txX, y);
+    if (isBossSpeaker && stillTyping) {
+      let cx = txX;
+      for (const ch of lines[i]) {
+        const offY = Math.sin(performance.now() / 140 + cx * 0.3) * 1.4;
+        ctx.fillStyle = `rgba(255, 220, 200, ${enterEase})`;
+        ctx.fillText(ch, cx, y + offY);
+        cx += ctx.measureText(ch).width;
+      }
+    } else {
+      ctx.fillStyle = `rgba(247, 240, 220, ${enterEase})`;
+      ctx.fillText(lines[i], txX, y);
+    }
+  }
+  // タイプライタのカーソル（喋り中だけ点滅）
+  if (stillTyping) {
+    const lastLine = lines[lines.length - 1] || "";
+    const lastLineW = ctx.measureText(lastLine).width;
+    const ly = txY + (Math.min(11, lines.length - 1)) * 13;
+    if ((Math.floor(performance.now() / 100) % 2) === 0) {
+      ctx.fillStyle = "#ffd86b";
+      ctx.fillRect(txX + lastLineW + 1, ly + 1, 5, 11);
+    }
+  }
+
+  // 進行マーカー — 全文表示完了で点滅、表示中は静か
+  ctx.font = `700 9px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.textAlign = "right"; ctx.textBaseline = "bottom";
+  if (!stillTyping) {
+    const blink = (Math.sin(performance.now() / 240) + 1) / 2;
+    const dy = -2 + Math.sin(performance.now() / 200) * 1.2;
+    ctx.fillStyle = `rgba(184, 242, 173, ${0.55 + 0.45 * blink})`;
+    ctx.fillText(`${game.dialogIdx + 1} / ${game.dialogQueue.length}  ▼`, boxX + boxW - 6, boxY + boxH - 4 + dy);
+  } else {
+    ctx.fillStyle = "rgba(120,120,120,0.6)";
+    ctx.fillText(`${game.dialogIdx + 1} / ${game.dialogQueue.length}`, boxX + boxW - 6, boxY + boxH - 4);
+  }
+  ctx.fillStyle = "rgba(160,160,160,0.6)";
+  ctx.fillText("クリックで進む", boxX + boxW - 6, boxY + 12);
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  drawSkipButton();
+}
+
+function drawPrologue() {
+  drawKamishibaiSceneList(PROLOGUE_SCENES, game.proIdx, game.proT, "prologue");
+}
+function drawEndingKamishibai() {
+  const list = ENDING_SCENES[game.endKind] || [];
+  drawKamishibaiSceneList(list, Math.min(game.endIdx, list.length - 1), game.endT, "ending");
+}
+
+// 紙芝居：背景画像＋フィルタ＋話者ボックス＋テキスト
+function drawKamishibaiSceneList(list, idx, t, label) {
+  const sc = list[idx];
+  if (!sc) return;
+
+  const dur = sc.dur || 4;
+  const inT = 0.6, outT = 0.5;
+  let alpha = 1;
+  if (sc.kind === "cta" || sc.kind === "title" && dur >= 90) {
+    alpha = Math.min(1, t / inT);
+  } else {
+    if (t < inT) alpha = t / inT;
+    else if (t > dur - outT) alpha = Math.max(0, (dur - t) / outT);
+  }
+
+  // 1) 全画面塗り潰し
+  ctx.fillStyle = "#06080c";
+  ctx.fillRect(0, 0, W, H);
+
+  // 2) 背景画像：シーン専用画像があれば優先、無ければ BG_STATES、最後は単色
+  const bgIdx = (sc.bg == null) ? 1 : Math.max(0, Math.min(3, sc.bg));
+  let scene = null;
+  if (label === "prologue" && PROLOGUE_IMAGES[idx]) scene = PROLOGUE_IMAGES[idx];
+  else if (label === "ending" && game && ENDING_IMAGES[game.endKind] && ENDING_IMAGES[game.endKind][idx]) {
+    scene = ENDING_IMAGES[game.endKind][idx];
+  }
+  const bg = scene || BG_STATES[bgIdx];
+  const top = 32, bot = 192;  // 中央 160px 帯
+  if (bg && bg.complete && bg.naturalWidth > 0) {
+    ctx.drawImage(bg, 0, top, W, bot - top);
+  } else {
+    const tone = ["#d8f0e8", "#c8d8c0", "#9c8a78", "#5a4f47"][bgIdx];
+    ctx.fillStyle = tone; ctx.fillRect(0, top, W, bot - top);
+  }
+  // フィルタ（上塗り）
+  if (sc.filter === "sepia") {
+    ctx.fillStyle = "rgba(120, 70, 30, 0.32)"; ctx.fillRect(0, top, W, bot - top);
+  } else if (sc.filter === "dim") {
+    ctx.fillStyle = "rgba(0, 0, 0, 0.42)"; ctx.fillRect(0, top, W, bot - top);
+  } else if (sc.filter === "warn") {
+    ctx.fillStyle = "rgba(180, 30, 30, 0.18)"; ctx.fillRect(0, top, W, bot - top);
+    // 走査線
+    ctx.fillStyle = "rgba(255, 60, 40, 0.07)";
+    for (let yy = top; yy < bot; yy += 4) ctx.fillRect(0, yy, W, 1);
+  } else if (sc.filter === "glow") {
+    const g = ctx.createRadialGradient(W/2, (top+bot)/2, 10, W/2, (top+bot)/2, W*0.6);
+    g.addColorStop(0, "rgba(255,240,200,0.0)");
+    g.addColorStop(0.6, "rgba(255,210,140,0.18)");
+    g.addColorStop(1, "rgba(40,20,0,0.45)");
+    ctx.fillStyle = g; ctx.fillRect(0, top, W, bot - top);
+  }
+  // 上下の黒帯（紙芝居のレターボックス）
+  ctx.fillStyle = "#05070a";
+  ctx.fillRect(0, 0, W, top);
+  ctx.fillRect(0, bot, W, H - bot);
+  // 帯と画像の境界に金線
+  ctx.strokeStyle = `rgba(255, 216, 107, ${0.55 * alpha})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, top + 0.5); ctx.lineTo(W, top + 0.5); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, bot - 0.5); ctx.lineTo(W, bot - 0.5); ctx.stroke();
+
+  // 3) シーン番号
+  ctx.fillStyle = "rgba(180, 180, 180, 0.5)";
+  ctx.font = `700 8px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.textAlign = "right"; ctx.textBaseline = "top";
+  ctx.fillText(`${idx + 1} / ${list.length}`, W - 6, 6);
+  ctx.textAlign = "left";
+
+  // 4) 話者バッジ（dlg / memo は専用配置）
+  ctx.textBaseline = "middle";
+  if (sc.kind === "dlg" && sc.speaker) {
+    const sp = sc.speaker;
+    ctx.font = `800 10px "Yu Gothic UI", Meiryo, sans-serif`;
+    const sw = Math.ceil(ctx.measureText(sp).width) + 14;
+    ctx.fillStyle = `rgba(70, 30, 18, ${alpha * 0.95})`;
+    ctx.fillRect(8, top + 4, sw, 16);
+    ctx.strokeStyle = `rgba(255, 216, 107, ${alpha})`;
+    ctx.strokeRect(8.5, top + 4.5, sw - 1, 15);
+    ctx.fillStyle = `rgba(255, 216, 107, ${alpha})`;
+    ctx.textAlign = "left";
+    ctx.fillText(sp, 14, top + 12);
+  } else if (sc.kind === "memo" && sc.head) {
+    // メモ：上部に題字
+    ctx.font = `900 12px "Yu Gothic UI", Meiryo, sans-serif`;
+    ctx.fillStyle = `rgba(255, 230, 180, ${alpha})`;
+    ctx.textAlign = "center";
+    ctx.lineWidth = 4; ctx.strokeStyle = `rgba(0,0,0,${alpha})`;
+    ctx.strokeText(sc.head, W/2, top - 12);
+    ctx.fillText(sc.head, W/2, top - 12);
+  } else if (sc.head && sc.kind === "title") {
+    // タイトル：でかめ・上部
+    ctx.font = `900 18px "Yu Gothic UI", Meiryo, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.lineWidth = 6; ctx.strokeStyle = `rgba(0,0,0,${alpha})`;
+    ctx.strokeText(sc.head, W/2, 18);
+    ctx.fillStyle = `rgba(255, 170, 80, ${alpha})`;
+    ctx.fillText(sc.head, W/2, 18);
+  } else if (sc.head) {
+    // narr：右上にヘッド
+    ctx.font = `900 12px "Yu Gothic UI", Meiryo, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.lineWidth = 4; ctx.strokeStyle = `rgba(0,0,0,${alpha})`;
+    ctx.strokeText(sc.head, W/2, 18);
+    ctx.fillStyle = `rgba(240, 220, 180, ${alpha})`;
+    ctx.fillText(sc.head, W/2, 18);
+  }
+
+  // 5) 本文（下の黒帯にレイアウト）
+  if (sc.body && sc.body.length) {
+    const baseY = bot + 12;
+    ctx.font = `800 11px "Yu Gothic UI", Meiryo, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.lineWidth = 4;
+    for (let i = 0; i < sc.body.length; i++) {
+      const ly = baseY + i * 13;
+      ctx.strokeStyle = `rgba(0,0,0,${alpha})`;
+      ctx.strokeText(sc.body[i], W/2, ly);
+      const isCtaHint = sc.kind === "cta" && (sc.body[i].includes("[") || i > 0);
+      ctx.fillStyle = isCtaHint
+        ? `rgba(184, 242, 173, ${alpha * (0.5 + 0.5 * Math.abs(Math.sin(performance.now()/420)))})`
+        : `rgba(245, 245, 245, ${alpha})`;
+      ctx.fillText(sc.body[i], W/2, ly);
+    }
+  }
+
+  // 6) 操作ヒント
+  ctx.font = `700 8px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.fillStyle = `rgba(160, 160, 160, ${0.55 + 0.45 * Math.abs(Math.sin(performance.now() / 500))})`;
+  ctx.textAlign = "center";
+  ctx.fillText("クリックで進む（右上ボタンで飛ばす）", W / 2, H - 6);
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  drawSkipButton();
+}
+
+function drawField() {
+  // ★ 動的背景：汚染レベルが上がるほど崩壊状態へ。ステージごとの底上げ＋汚染で大きく動く
+  const ac = avgContam();
+  const stageBias = (game.stage - 1) * 0.85;        // 各ステージで明確に1段階近く下地を進める
+  const fState = Math.max(0, Math.min(3, stageBias + ac / 24));  // 汚染24%で1段階分
+  const i0 = Math.floor(fState), i1 = Math.min(3, i0 + 1);
+  const blend = fState - i0;
+  const A = BG_STATES[i0], B = BG_STATES[i1];
+  const aReady = A && A.complete && A.naturalWidth > 0;
+  const bReady = B && B.complete && B.naturalWidth > 0;
+  const useBG = aReady || bReady;
+
+  if (aReady) {
+    ctx.globalAlpha = bReady ? Math.max(0, 1 - blend) : 1;
+    ctx.drawImage(A, 0, PLAY_TOP, W, PLAY_BOTTOM - PLAY_TOP);
+  }
+  if (bReady && i1 !== i0) {
+    ctx.globalAlpha = blend;
+    ctx.drawImage(B, 0, PLAY_TOP, W, PLAY_BOTTOM - PLAY_TOP);
+  }
+  ctx.globalAlpha = 1;
+  if (!useBG) {
+    // フォールバック（旧実装）
+    const wall = game.stage === 1 ? "#b7d9e0" : game.stage === 2 ? "#8ea08b" : "#5a4f47";
+    const bg   = game.stage === 1 ? "#d8f5ef" : game.stage === 2 ? "#c3d0bd" : "#9a8b78";
+    ctx.fillStyle = wall;
+    ctx.fillRect(0, PLAY_TOP, W, PLAY_BOTTOM - PLAY_TOP);
+    ctx.fillStyle = bg;
+    ctx.fillRect(4, PLAY_TOP + 4, W - 8, PLAY_BOTTOM - PLAY_TOP - 8);
+  }
+
+  const bg = game.stage === 1 ? "#d8f5ef" : "#c3d0bd";
+  const pathColor = game.stage === 1 ? "#f7f0dc" : "#e4d3a8";
+
+  for (let ty = 0; ty < PLAY_H_TILES; ty++) {
+    for (let tx = 0; tx < MAP_W; tx++) {
+      const x = tx * TILE, y = PLAY_TOP + ty * TILE;
+      const noise = (tx * 17 + ty * 31 + (game.stage - 1) * 19) % 5;
+      const isPath = pathTiles.has(ty * MAP_W + tx);
+      if (!useBG) {
+        ctx.fillStyle = isPath ? shade(pathColor, noise + 1) : shade(bg, noise - 1);
+        ctx.fillRect(x, y, TILE, TILE);
+      }
+      if (isPath) {
+        // 背景画像があるときは控えめに、無いときはくっきり
+        ctx.fillStyle = useBG
+          ? (game.stage === 1 ? "rgba(255, 229, 102, 0.26)" : "rgba(255, 185, 58, 0.36)")
+          : (game.stage === 1 ? "rgba(255, 229, 102, 0.42)" : "rgba(255, 185, 58, 0.52)");
+        ctx.fillRect(x + 1, y + 1, TILE - 2, TILE - 2);
+      }
+      if (!useBG && !isPath && noise === 0) {
+        ctx.fillStyle = "rgba(255, 255, 255, 0.18)";
+        ctx.fillRect(x + 2, y + 2, 4, 1);
+      }
+      const c = getContam(tx, ty);
+      if (c > 1) {
+        const cap = useBG ? 0.55 : 0.82;
+        const div = useBG ? 140 : 105;
+        ctx.fillStyle = `rgba(92, 45, 24, ${Math.min(cap, c / div)})`;
+        ctx.fillRect(x, y, TILE, TILE);
+        ctx.fillStyle = `rgba(30, 18, 12, ${Math.min(0.45, c / 160)})`;
+        if ((tx + ty) % 2 === 0) ctx.fillRect(x + 3, y + 4, 5, 3);
+        if ((tx * 3 + ty) % 4 === 0) ctx.fillRect(x + 9, y + 9, 4, 2);
+      }
+    }
+  }
+
+  // ★ 塔が置いてあるマスは「踏み台」を描いて宙に浮いて見えないようにする
+  for (const t of game.towers) {
+    if (t.tx == null) continue;
+    const x = t.tx * TILE, y = PLAY_TOP + t.ty * TILE;
+    // 床面のへこみ（暗い影）
+    ctx.fillStyle = "rgba(20, 14, 10, 0.45)";
+    ctx.fillRect(x + 1, y + TILE - 4, TILE - 2, 3);
+    // タイル全体に薄い色付け（塔ごとに色を変える）
+    const tint = t.type === "toilet" ? "rgba(140,200,230,0.22)"
+              : t.type === "sink"   ? "rgba(110,200,220,0.22)"
+              : t.type === "paper"  ? "rgba(230,210,140,0.22)"
+              :                       "rgba(220,120,100,0.22)";
+    ctx.fillStyle = tint;
+    ctx.fillRect(x, y, TILE, TILE);
+    // 縁取り（明るめのライン）
+    ctx.strokeStyle = "rgba(255,216,107,0.85)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, TILE - 1, TILE - 1);
+    // 内側の小さな枠で「台座」感
+    ctx.strokeStyle = "rgba(0,0,0,0.35)";
+    ctx.strokeRect(x + 2.5, y + 2.5, TILE - 5, TILE - 5);
+  }
+
+  // ★ 配置可能マスのグリッド線（常時うっすら表示・通路を除く）
+  ctx.save();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = useBG ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.10)";
+  for (let ty = 0; ty < PLAY_H_TILES; ty++) {
+    for (let tx = 0; tx < MAP_W; tx++) {
+      if (pathTiles.has(ty * MAP_W + tx)) continue;
+      const x = tx * TILE, y = PLAY_TOP + ty * TILE;
+      ctx.strokeRect(x + 0.5, y + 0.5, TILE - 1, TILE - 1);
+    }
+  }
+  // 通路マスの外周だけは赤茶でくっきり
+  ctx.strokeStyle = useBG ? "rgba(255,120,80,0.55)" : "rgba(255,120,80,0.45)";
+  ctx.lineWidth = 1;
+  for (let ty = 0; ty < PLAY_H_TILES; ty++) {
+    for (let tx = 0; tx < MAP_W; tx++) {
+      if (!pathTiles.has(ty * MAP_W + tx)) continue;
+      const x = tx * TILE, y = PLAY_TOP + ty * TILE;
+      // 隣が通路でない辺のみ描いて外周だけにする
+      if (!pathTiles.has(ty * MAP_W + tx - 1) || tx === 0)        { ctx.beginPath(); ctx.moveTo(x + 0.5, y); ctx.lineTo(x + 0.5, y + TILE); ctx.stroke(); }
+      if (!pathTiles.has(ty * MAP_W + tx + 1) || tx === MAP_W-1)  { ctx.beginPath(); ctx.moveTo(x + TILE - 0.5, y); ctx.lineTo(x + TILE - 0.5, y + TILE); ctx.stroke(); }
+      if (!pathTiles.has((ty-1) * MAP_W + tx) || ty === 0)        { ctx.beginPath(); ctx.moveTo(x, y + 0.5); ctx.lineTo(x + TILE, y + 0.5); ctx.stroke(); }
+      if (!pathTiles.has((ty+1) * MAP_W + tx) || ty === PLAY_H_TILES-1) { ctx.beginPath(); ctx.moveTo(x, y + TILE - 0.5); ctx.lineTo(x + TILE, y + TILE - 0.5); ctx.stroke(); }
+    }
+  }
+  ctx.restore();
+}
+
+function shade(hex, step) {
+  const v = hex.replace("#", "");
+  const r = Math.max(0, Math.min(255, parseInt(v.slice(0,2),16) + step * 5));
+  const g = Math.max(0, Math.min(255, parseInt(v.slice(2,4),16) + step * 5));
+  const b = Math.max(0, Math.min(255, parseInt(v.slice(4,6),16) + step * 5));
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+function drawPathLines() {
+  for (let i = 0; i < PATHS.length; i++) {
+    const px = pathPx(i);
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.7)";
+    ctx.lineWidth = 6; ctx.lineCap = "round"; ctx.lineJoin = "round";
+    ctx.beginPath();
+    px.forEach((p, k) => k === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+    ctx.stroke();
+    ctx.strokeStyle = game.stage === 1 ? "#ffcf4d" : "#ff8f3d";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    px.forEach((p, k) => k === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+    ctx.stroke();
+    for (let k = 0; k < px.length - 1; k++) {
+      const a = px[k], b = px[k + 1];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const length = Math.hypot(dx, dy);
+      const steps = Math.max(1, Math.floor(length / 28));
+      const angle = Math.atan2(dy, dx);
+      for (let s = 1; s <= steps; s++) {
+        const tt = s / (steps + 1);
+        drawArrow(a.x + dx * tt, a.y + dy * tt, angle);
+      }
+    }
+  }
+  for (let i = 0; i < PATHS.length; i++) {
+    const PATH = PATHS[i];
+    const start = PATH[0], end = PATH[PATH.length - 1];
+    const sx = start.tx * TILE + TILE/2;
+    const sy = PLAY_TOP + start.ty * TILE + TILE/2;
+    ctx.fillStyle = "#251a18";
+    roundedRect(sx - 6, sy - 8, 12, 16, 3);
+    ctx.fillStyle = game.stage === 1 ? "#533936" : "#1d1210";
+    roundedRect(sx - 4, sy - 6, 8, 12, 2);
+    ctx.fillStyle = "#ffd75f";
+    ctx.fillRect(sx - 1, sy - 1, 2, 2);
+    const ex = end.tx * TILE + TILE/2;
+    const ey = PLAY_TOP + end.ty * TILE + TILE/2;
+    ctx.fillStyle = "#cdd7d9";
+    roundedRect(ex - 7, ey - 6, 14, 12, 3);
+    ctx.fillStyle = "#f4fbff";
+    roundedRect(ex - 5, ey - 4, 10, 8, 2);
+    ctx.fillStyle = "#96d9ef";
+    ctx.fillRect(ex - 3, ey - 2, 6, 4);
+  }
+  ctx.lineCap = "butt"; ctx.lineJoin = "miter"; ctx.lineWidth = 1;
+}
+
+function drawArrow(x, y, angle) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.fillStyle = "#2f2118";
+  ctx.beginPath();
+  ctx.moveTo(5, 0); ctx.lineTo(-3, -4); ctx.lineTo(-1.5, 0); ctx.lineTo(-3, 4);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#fff1a6";
+  ctx.beginPath();
+  ctx.moveTo(3, 0); ctx.lineTo(-2, -2.5); ctx.lineTo(-1.5, 0); ctx.lineTo(-2, 2.5);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function drawSigns() {
+  if (game.stage === 1) {
+    drawNote(2, PLAY_TOP + 4, "清掃中(嘘)");
+    drawNote(2, PLAY_TOP + 100, "故障 直す予定なし");
+  } else {
+    drawNote(2, PLAY_TOP + 4, "もう手遅れ");
+    drawNote(2, PLAY_TOP + 100, "頼む 押し返して");
+  }
+  ctx.font = `700 8px "Yu Gothic UI", Meiryo, sans-serif`;
+  for (let i = 0; i < PATHS.length; i++) {
+    const start = PATHS[i][0];
+    const sx = start.tx * TILE + TILE/2;
+    const sy = PLAY_TOP + start.ty * TILE + TILE/2;
+    const label = game.stage === 1 ? (i === 0 ? "入口A" : "入口B") : (i === 0 ? "汚染源A" : "汚染源B");
+    const tw = Math.ceil(ctx.measureText(label).width) + 6;
+    const nx = Math.max(2, Math.min(W - tw - 2, sx - tw/2));
+    drawNote(nx, sy - 14, label);
+  }
+}
+function drawNote(x, y, value) {
+  ctx.font = `700 8px "Yu Gothic UI", Meiryo, sans-serif`;
+  const w = Math.ceil(ctx.measureText(value).width) + 6;
+  ctx.fillStyle = game.stage === 1 ? "#fff8d8" : "#ffd074";
+  roundedRect(x, y, w, 11, 2);
+  ctx.strokeStyle = "#40352a";
+  ctx.lineWidth = 0.6;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, 10);
+  tinyText(value, x + 3, y + 6, "#40352a");
+}
+
+function drawTower(t) {
+  const base = { x: t.cx, y: t.cy };
+  const pulse = t.attackFlash || 0;
+  const bob = Math.sin(t.bob || 0) * 0.8;
+  const hit = (t.hitFlash || 0) * 0.8;
+  const shake = hit > 0 ? (Math.random() - 0.5) * hit * 2 : 0;
+  const isMoving = (t === game.movingTower);
+  const lift = isMoving ? 3 + Math.sin(performance.now() / 140) * 1.2 : 0;
+  const p = { x: base.x + shake, y: base.y + bob - pulse * 1.4 - lift };
+
+  // 移動モード中ならマス枠＋射程を強調表示
+  if (isMoving && t.tx != null) {
+    ctx.save();
+    ctx.fillStyle = "rgba(255, 216, 107, 0.18)";
+    ctx.fillRect(t.tx * TILE, PLAY_TOP + t.ty * TILE, TILE, TILE);
+    ctx.strokeStyle = "#ffd86b";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 2]);
+    ctx.strokeRect(t.tx * TILE + 0.5, PLAY_TOP + t.ty * TILE + 0.5, TILE - 1, TILE - 1);
+    ctx.setLineDash([]);
+    if (t.def.range) {
+      ctx.strokeStyle = "rgba(255, 216, 107, 0.55)";
+      ctx.beginPath();
+      ctx.arc(t.cx, t.cy, t.def.range, 0, Math.PI * 2);
+      ctx.stroke();
+    } else if (t.def.radius) {
+      ctx.strokeStyle = "rgba(255, 248, 216, 0.55)";
+      ctx.beginPath();
+      ctx.arc(t.cx, t.cy, t.def.radius * TILE, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  if (t.tx != null) {
+    ctx.fillStyle = `rgba(0, 0, 0, ${isMoving ? 0.5 : 0.28})`;
+    ctx.beginPath();
+    ctx.ellipse(p.x, base.y + 7, 7 + (isMoving ? 1 : 0), 2.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  if (pulse > 0) drawTowerAttackMotion(t, base, pulse);
+
+  // ボディ: スプライト優先、なければ手描き
+  const spec = SPRITES[t.type];
+  let frame = 0;
+  if (spec) {
+    if (pulse > 0.25 && spec.attackFrame != null) frame = spec.attackFrame;
+    else frame = (Math.floor((t.bob || 0) * 1.5) % 2);
+  }
+  const drewSprite = drawSpriteFrame(t.type, frame, p.x, p.y);
+  if (!drewSprite) {
+    if (t.type === "toilet") {
+      ctx.fillStyle = "#b9ced6";
+      roundedRect(p.x - 7, p.y - 8, 14, 16, 4);
+      ctx.fillStyle = "#f7fdff";
+      roundedRect(p.x - 6, p.y - 9, 12, 7, 3);
+      roundedRect(p.x - 8, p.y - 3, 16, 12, 5);
+      ctx.fillStyle = "#70cde8";
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y + 2 + pulse * 1.5, 5 + pulse * 1.8, 3 + pulse, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (t.type === "sink") {
+      ctx.fillStyle = "#5aa5bd";
+      roundedRect(p.x - 8, p.y - 5, 16, 12, 4);
+      ctx.fillStyle = "#d8fbff";
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y - 2, 8, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#4386a4";
+      ctx.fillRect(p.x - 2, p.y - 8, 4, 4);
+    } else if (t.type === "paper") {
+      ctx.fillStyle = "#b59e68";
+      roundedRect(p.x - 8, p.y - 8, 16, 16, 4);
+      ctx.fillStyle = "#fff8d8";
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y, 7, 8, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (t.type === "plunger") {
+      ctx.fillStyle = "#8b503e";
+      roundedRect(p.x - 2, p.y - 10 - pulse * 4, 4, 15 + pulse * 5, 2);
+      ctx.fillStyle = "#d33636";
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y + 4, 8, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // 被弾フラッシュ
+  if (hit > 0) {
+    ctx.fillStyle = `rgba(255, 80, 80, ${hit * 0.5})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ★ 移動直後クールダウン（リング＋うっすら暗幕＋テキスト）
+  if (t.moveLockT && t.moveLockT > 0 && t.moveLockMax) {
+    const r = t.moveLockT / t.moveLockMax;
+    // 暗幕
+    ctx.save();
+    ctx.fillStyle = `rgba(8,12,18,${0.35 * r})`;
+    ctx.fillRect(t.tx * TILE, PLAY_TOP + t.ty * TILE, TILE, TILE);
+    // 円形ゲージ
+    ctx.strokeStyle = "rgba(255,216,107,0.85)";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y - 2, 8, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * r);
+    ctx.stroke();
+    // 中心ドット
+    ctx.fillStyle = "rgba(255,216,107,0.85)";
+    ctx.beginPath();
+    ctx.arc(p.x, p.y - 2, 1.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ★ 塔のHPバー（味方は壊れるよ）
+  if (t.tx != null && t.maxHp != null && t.hp < t.maxHp) {
+    const bw = 14;
+    const ratio = Math.max(0, t.hp / t.maxHp);
+    ctx.fillStyle = "#1a0a0a";
+    ctx.fillRect(p.x - bw/2, p.y - 13, bw, 2);
+    ctx.fillStyle = ratio > 0.5 ? "#62e58b" : ratio > 0.25 ? "#ffcf52" : "#ff6652";
+    ctx.fillRect(p.x - bw/2, p.y - 13, bw * ratio, 2);
+  }
+
+  // ひび割れ表現（HP25%以下）
+  if (t.tx != null && t.hp < t.maxHp * 0.25) {
+    ctx.strokeStyle = "rgba(20,10,5,0.7)";
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    ctx.moveTo(p.x - 4, p.y - 4); ctx.lineTo(p.x - 1, p.y); ctx.lineTo(p.x + 3, p.y - 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(p.x + 2, p.y + 5); ctx.lineTo(p.x - 1, p.y + 2);
+    ctx.stroke();
+  }
+}
+
+function drawPlacePreview() {
+  if (game.mode !== "playing" || game.movingTower || !game.hover.on) return;
+  const tx = game.hover.tx, ty = game.hover.ty;
+  const occupied = !!towerAt(tx, ty);
+  const onPath = pathTiles.has(ty * MAP_W + tx);
+  const def = TOWER_DEFS[game.selected];
+  const enoughCoin = game.coins >= def.cost;
+  ctx.save();
+
+  // 塔のあるマス：エラーじゃなく「クリックで持ち上げて移動」の青ハイライト
+  if (occupied) {
+    ctx.fillStyle = "rgba(120, 200, 255, 0.22)";
+    ctx.fillRect(tx * TILE, PLAY_TOP + ty * TILE, TILE, TILE);
+    ctx.strokeStyle = "rgba(140, 220, 255, 0.95)";
+    ctx.setLineDash([3, 2]);
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tx * TILE + 0.5, PLAY_TOP + ty * TILE + 0.5, TILE - 1, TILE - 1);
+    ctx.setLineDash([]);
+    // ヒント
+    ctx.font = `700 8px "Yu Gothic UI", Meiryo, sans-serif`;
+    ctx.textBaseline = "bottom";
+    ctx.textAlign = "center";
+    ctx.lineWidth = 3; ctx.strokeStyle = "#0c0e12";
+    ctx.strokeText("クリックで移動", tx * TILE + TILE/2, PLAY_TOP + ty * TILE - 1);
+    ctx.fillStyle = "#bce3ff";
+    ctx.fillText("クリックで移動", tx * TILE + TILE/2, PLAY_TOP + ty * TILE - 1);
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    ctx.restore();
+    return;
+  }
+
+  const ok = !onPath && enoughCoin;
+  ctx.fillStyle = ok ? "rgba(110,240,139,0.22)" : "rgba(255,80,70,0.22)";
+  ctx.fillRect(tx * TILE, PLAY_TOP + ty * TILE, TILE, TILE);
+  ctx.strokeStyle = ok ? "rgba(127,255,166,0.95)" : "rgba(255,122,107,0.9)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(tx * TILE + 0.5, PLAY_TOP + ty * TILE + 0.5, TILE - 1, TILE - 1);
+  if (ok) {
+    const cx = tx * TILE + TILE/2, cy = PLAY_TOP + ty * TILE + TILE/2;
+    if (def.range) {
+      ctx.strokeStyle = "rgba(255,255,255,0.32)";
+      ctx.beginPath(); ctx.arc(cx, cy, def.range, 0, Math.PI * 2); ctx.stroke();
+    } else if (def.radius) {
+      ctx.strokeStyle = "rgba(255,248,216,0.32)";
+      ctx.beginPath(); ctx.arc(cx, cy, def.radius * TILE, 0, Math.PI * 2); ctx.stroke();
+    }
+  } else {
+    let reason = "";
+    if (onPath) reason = "通路";
+    else if (!enoughCoin) reason = `${def.cost - game.coins}C不足`;
+    if (reason) {
+      ctx.font = `700 8px "Yu Gothic UI", Meiryo, sans-serif`;
+      ctx.textBaseline = "bottom";
+      ctx.textAlign = "center";
+      ctx.lineWidth = 3; ctx.strokeStyle = "#0c0e12";
+      ctx.strokeText(reason, tx * TILE + TILE/2, PLAY_TOP + ty * TILE - 1);
+      ctx.fillStyle = "#ffb59a";
+      ctx.fillText(reason, tx * TILE + TILE/2, PLAY_TOP + ty * TILE - 1);
+      ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    }
+  }
+  ctx.restore();
+}
+function drawMovePreview() {
+  const t = game.movingTower;
+  if (!t || !game.hover.on) return;
+  const tx = game.hover.tx, ty = game.hover.ty;
+  const occupied = towerAt(tx, ty) && towerAt(tx, ty) !== t;
+  const onPath = pathTiles.has(ty * MAP_W + tx);
+  const ok = !occupied && !onPath;
+  ctx.save();
+  ctx.fillStyle = ok ? "rgba(110, 240, 139, 0.28)" : "rgba(255, 90, 80, 0.30)";
+  ctx.fillRect(tx * TILE, PLAY_TOP + ty * TILE, TILE, TILE);
+  ctx.strokeStyle = ok ? "#7fffa6" : "#ff7a6b";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(tx * TILE + 0.5, PLAY_TOP + ty * TILE + 0.5, TILE - 1, TILE - 1);
+  if (ok) {
+    const cx = tx * TILE + TILE/2, cy = PLAY_TOP + ty * TILE + TILE/2;
+    ctx.strokeStyle = "rgba(255,255,255,0.45)";
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(t.cx, t.cy); ctx.lineTo(cx, cy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (t.def.range) {
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+      ctx.beginPath(); ctx.arc(cx, cy, t.def.range, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+// 紙タワーの常時射程リング（清掃範囲を可視化）
+function drawPaperRangeRings() {
+  for (const t of game.towers) {
+    if (t.type !== "paper" || t.hp <= 0) continue;
+    const r = t.def.radius * TILE;
+    // 外側：薄い金色のリング（常時表示）
+    ctx.save();
+    ctx.strokeStyle = "rgba(255, 248, 216, 0.32)";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(t.cx, t.cy, r, 0, Math.PI * 2); ctx.stroke();
+    // 内側：脈動する薄い光（清掃中アピール）
+    const pulse = (Math.sin(performance.now()/240 + t.cx*0.01) + 1) / 2;
+    ctx.strokeStyle = `rgba(255, 248, 216, ${0.12 + pulse * 0.10})`;
+    ctx.beginPath(); ctx.arc(t.cx, t.cy, r * (0.55 + pulse * 0.30), 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+}
+// 清掃されたタイルを白光で点滅させる
+function drawCleanTileFx() {
+  if (!game.cleanFx || game.cleanFx.length === 0) return;
+  ctx.save();
+  for (const f of game.cleanFx) {
+    const k = Math.max(0, f.life / f.max);
+    ctx.fillStyle = `rgba(255, 252, 220, ${0.45 * k})`;
+    ctx.fillRect(f.tx * TILE, PLAY_TOP + f.ty * TILE, TILE, TILE);
+    ctx.strokeStyle = `rgba(255, 240, 180, ${0.85 * k})`;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(f.tx * TILE + 0.5, PLAY_TOP + f.ty * TILE + 0.5, TILE - 1, TILE - 1);
+  }
+  ctx.restore();
+}
+
+function drawTowerAttackMotion(t, origin, pulse) {
+  const angle = Math.atan2((t.aimY || origin.y) - origin.y, (t.aimX || origin.x) - origin.x);
+  ctx.save();
+  ctx.globalAlpha = 0.25 + pulse * 0.45;
+  if (t.type === "toilet") {
+    ctx.strokeStyle = "#8ce8ff";
+    ctx.lineWidth = 2 + pulse * 2;
+    ctx.beginPath();
+    ctx.moveTo(origin.x, origin.y);
+    ctx.lineTo(origin.x + Math.cos(angle) * 24, origin.y + Math.sin(angle) * 24);
+    ctx.stroke();
+  } else if (t.type === "sink") {
+    ctx.strokeStyle = "#baf8ff";
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(origin.x, origin.y, 15 + pulse * 19, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(origin.x, origin.y, 7 + pulse * 13, 0, Math.PI * 2); ctx.stroke();
+  } else if (t.type === "paper") {
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(origin.x, origin.y, 12 + pulse * 33, 0, Math.PI * 2); ctx.stroke();
+  } else if (t.type === "plunger") {
+    ctx.fillStyle = "#ff8066";
+    ctx.translate(origin.x, origin.y);
+    ctx.rotate(angle);
+    roundedRect(2, -3, 20 + pulse * 14, 6, 3);
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+function drawEnemy(e) {
+  const snared = (e.snareT && e.snareT > 0);
+  const walk = snared ? 0 : Math.sin(e.wobble);
+  const x = e.x + (snared ? 0 : Math.sin(e.wobble * 0.7) * (e.type === "roach" ? 1.4 : 0.8));
+  const y = e.y + (snared ? 0 : walk * (e.type === "child" ? 1.4 : 0.7));
+  const size = e.def.size;
+
+  // 縛られている敵：周囲に紙のリボン（白い帯）をぐるぐる
+  if (snared) {
+    const t = performance.now() / 220;
+    ctx.save();
+    ctx.strokeStyle = "rgba(255, 248, 216, 0.95)";
+    ctx.lineWidth = 1.6;
+    for (let i = 0; i < 3; i++) {
+      const phase = t + i * (Math.PI * 2 / 3);
+      ctx.beginPath();
+      for (let a = 0; a < Math.PI * 2; a += 0.25) {
+        const r1 = size + 2 + Math.sin(a * 3 + phase) * 2.2;
+        const px = x + Math.cos(a) * r1, py = y + Math.sin(a) * r1 * 0.7;
+        if (a === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath(); ctx.stroke();
+    }
+    // 紙の細片
+    ctx.fillStyle = "rgba(255, 240, 200, 0.55)";
+    for (let i = 0; i < 5; i++) {
+      const a = t + i * 1.3;
+      ctx.fillRect(x + Math.cos(a) * (size + 4) - 1, y + Math.sin(a) * (size + 3) - 1, 2, 2);
+    }
+    ctx.restore();
+  }
+
+  // ★ ボスのダメージオーラ：赤いパルス円（auraR が表示半径）
+  if (e.def && e.def.boss && e.def.auraR) {
+    const pulse = (Math.sin(performance.now() / 220) + 1) / 2;
+    const r = e.def.auraR;
+    ctx.save();
+    ctx.fillStyle = `rgba(220, 40, 40, ${0.10 + pulse * 0.10})`;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = `rgba(255, 90, 70, ${0.55 + pulse * 0.35})`;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+    // 内側の細い線でオーラ感
+    ctx.strokeStyle = `rgba(255, 200, 120, ${0.30 + pulse * 0.30})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(x, y, r * 0.55, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+  ctx.beginPath();
+  ctx.ellipse(x, e.y + size - 1, size + 1, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (e.hp < e.maxHp) {
+    const bw = (e.def && e.def.boss) ? 24 : 16;
+    ctx.fillStyle = "#2a1712";
+    ctx.fillRect(x - bw / 2, y - size - 6, bw, 2);
+    const ratio = Math.max(0, e.hp / e.maxHp);
+    ctx.fillStyle = ratio > 0.5 ? "#6ef08b" : ratio > 0.25 ? "#ffcf52" : "#ff6652";
+    ctx.fillRect(x - bw / 2, y - size - 6, bw * ratio, 2);
+  }
+
+  if (e.hitFlash > 0) {
+    ctx.fillStyle = `rgba(255,255,255,${e.hitFlash * 0.65})`;
+    ctx.beginPath();
+    ctx.arc(x, y, size + 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ボディ: スプライト優先（歩行コマを wobble で 0/1 切り替え）、なければ手描き
+  const frame = (Math.floor(e.wobble * 1.5) % 2);
+  const drew = drawSpriteFrame(e.type, frame, x, y);
+  if (!drew) {
+    if (e.type === "roach") {
+      ctx.fillStyle = "#0f0b08";
+      ctx.beginPath(); ctx.ellipse(x, y, 6, 4, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#6b3c1f";
+      ctx.beginPath(); ctx.ellipse(x, y, 3, 6, 0, 0, Math.PI * 2); ctx.fill();
+    } else if (e.type === "poop") {
+      ctx.fillStyle = "#4d2918";
+      ctx.beginPath(); ctx.ellipse(x, y + 4, 8 + Math.abs(walk), 4, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#7a421e";
+      ctx.beginPath();
+      ctx.ellipse(x, y + 1, 7, 5 + Math.abs(walk * 0.5), 0, 0, Math.PI * 2);
+      ctx.ellipse(x, y - 4, 5, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (e.type === "child") {
+      ctx.fillStyle = "#ffd09a";
+      ctx.beginPath(); ctx.arc(x, y - 7, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#4d7edb";
+      roundedRect(x - 5, y - 3, 10, 11, 4);
+    } else if (e.def && e.def.boss) {
+      const baseC = e.type === "poopking" ? "#5a3015" : e.type === "bratboss" ? "#3a4a1a" : "#4a2317";
+      ctx.fillStyle = baseC;
+      ctx.beginPath(); ctx.ellipse(x, y, 13, 10 + Math.abs(walk), 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#12100f";
+      roundedRect(x - 8, y - 12, 16, 7, 3);
+    }
+  }
+
+  if (e.slowMul < 0.95) {
+    ctx.fillStyle = "rgba(120,200,255,0.85)";
+    ctx.beginPath();
+    ctx.ellipse(x, e.y + size + 1, 4, 1.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawShot(s) {
+  const k = 1 - Math.min(1, s.life / (s.lifeMax || 0.3));
+  const x = s.x + (s.tx - s.x) * k;
+  const y = s.y + (s.ty - s.y) * k;
+  const angle = Math.atan2(s.ty - s.y, s.tx - s.x);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  if (s.kind === "toilet") {
+    ctx.fillStyle = "rgba(255, 255, 255, 0.55)";
+    ctx.beginPath(); ctx.ellipse(0, 0, 6, 3, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#79ddff";
+    ctx.beginPath(); ctx.ellipse(1, 0, 4, 2, 0, 0, Math.PI * 2); ctx.fill();
+  } else if (s.kind === "plunger") {
+    ctx.fillStyle = "#ff8066";
+    roundedRect(-2, -3, 10, 6, 3);
+    ctx.fillStyle = "#8b503e";
+    ctx.fillRect(-8, -1, 8, 2);
+  } else {
+    ctx.fillStyle = s.color;
+    ctx.fillRect(-2, -2, 4, 4);
+  }
+  ctx.restore();
+}
+
+function drawParticles() {
+  for (const p of game.particles) {
+    const a = Math.max(0, p.life / p.maxLife);
+    ctx.globalAlpha = a;
+    if (p.text) {
+      // テキストパーティクル（数字ポップ）
+      ctx.font = `900 ${p.size}px "Yu Gothic UI", Meiryo, sans-serif`;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.lineWidth = 3; ctx.strokeStyle = "#0c0e12";
+      ctx.strokeText(p.text, p.x, p.y);
+      ctx.fillStyle = p.color;
+      ctx.fillText(p.text, p.x, p.y);
+      ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    } else {
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - p.size/2, p.y - p.size/2, p.size, p.size);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+// 小さなコイン絵（英字代わりに使用）
+function kt(x, y) {
+  ctx.fillStyle = "#7b4c13";
+  ctx.fillRect(Math.round(x) - 4, Math.round(y) - 5, 8, 10);
+  ctx.fillStyle = "#ffd861";
+  ctx.fillRect(Math.round(x) - 3, Math.round(y) - 4, 6, 8);
+  ctx.fillStyle = "#fff1a6";
+  ctx.fillRect(Math.round(x) - 1, Math.round(y) - 3, 2, 6);
+}
+
+function drawTopHUD() {
+  ctx.fillStyle = "#1b2028";
+  ctx.fillRect(0, 0, W, PLAY_TOP);
+  ctx.fillStyle = "#3a1610";
+  ctx.fillRect(4, 4, 56, 6);
+  const hpRatio = Math.max(0, game.hp / 20);
+  ctx.fillStyle = hpRatio > 0.6 ? "#62e58b" : hpRatio > 0.3 ? "#ffcf52" : "#ff6652";
+  ctx.fillRect(5, 5, 54 * hpRatio, 4);
+  // 清潔度（HP相当）に汚染メーターも統合：清潔度が低いほど色が赤くなる
+  const cleanLevel = Math.max(0, game.hp);
+  const cleanColor = cleanLevel > 12 ? "#b8f2ad" : cleanLevel > 6 ? "#ffcc66" : "#ff6b58";
+  text(`清潔度${cleanLevel}`, 56, 8, cleanColor, 9);
+  kt(106, 8);
+  text(`${game.coins}`, 116, 8, "#ffd86b", 10);
+  text(`第${game.stage}幕`, 150, 8, "#ffffff", 9);
+  text(`経過${(game.stageT||0).toFixed(0)}秒`, 192, 8, "#fff", 9);
+  if (game.msgT > 0) text(game.msg, 240, 8, "#ffb05f", 8);
+}
+
+function drawBottomHUD() {
+  ctx.fillStyle = "#101319";
+  ctx.fillRect(0, PLAY_BOTTOM, W, H - PLAY_BOTTOM);
+  for (let i = 0; i < 4; i++) {
+    const x = i * 80;
+    const def = TOWER_DEFS[TOWER_KEYS[i]];
+    const sel = game.selected === TOWER_KEYS[i];
+    ctx.fillStyle = sel ? "#edf6ff" : "#3b3f4a";
+    roundedRect(x + 4, PLAY_BOTTOM + 3, 72, 26, 4);
+    drawTower({ type: TOWER_KEYS[i], def, cx: x + 16, cy: PLAY_BOTTOM + 16, attackFlash: 0, bob: 0 });
+    const fg = sel ? "#111820" : "#f7f0dc";
+    const cc = sel ? "#4b2600" : "#ffd86b";
+    tinyText(`${i+1} ${def.name}`, x + 28, PLAY_BOTTOM + 11, fg);
+    tinyText(`${def.cost}`, x + 28, PLAY_BOTTOM + 22, game.coins >= def.cost ? cc : "#888");
+  }
+}
+
+function drawCrisisEffects() {
+  if (game.mode !== "playing") return;
+  const hpRatio = Math.max(0, Math.min(1, game.hp / 20));
+  const ac = avgContam() / 100;
+  const bossAlive = game.enemies.some(e => e.def && e.def.boss && e.hp > 0);
+  // 危機度（0〜1+）
+  const danger = Math.max(1 - hpRatio, ac, bossAlive ? 0.5 : 0);
+  if (danger <= 0.08) return;
+
+  const tt = game.t;
+  const pulse = (Math.sin(tt * (5 + danger * 8)) + 1) / 2;
+
+  // 縁の赤脈動
+  const edge = Math.round(4 + danger * 22);
+  const aEdge = Math.min(0.85, (0.18 + pulse * 0.45) * danger);
+  ctx.fillStyle = `rgba(220, 28, 28, ${aEdge})`;
+  ctx.fillRect(0, PLAY_TOP, W, edge);
+  ctx.fillRect(0, PLAY_BOTTOM - edge, W, edge);
+  ctx.fillRect(0, PLAY_TOP, edge, PLAY_BOTTOM - PLAY_TOP);
+  ctx.fillRect(W - edge, PLAY_TOP, edge, PLAY_BOTTOM - PLAY_TOP);
+
+  // 汚染寄りなら茶色の脈動も足す
+  if (ac > 0.35) {
+    const a2 = (ac - 0.35) * 0.55;
+    ctx.fillStyle = `rgba(92, 45, 24, ${a2 * (0.4 + pulse * 0.5)})`;
+    const e2 = Math.round(2 + ac * 14);
+    ctx.fillRect(0, PLAY_TOP, W, e2);
+    ctx.fillRect(0, PLAY_BOTTOM - e2, W, e2);
+  }
+
+  // 全体うっすら赤味（HP30%以下や汚染60%以上で）
+  if (danger > 0.5) {
+    ctx.fillStyle = `rgba(160, 14, 14, ${(danger - 0.5) * 0.18})`;
+    ctx.fillRect(0, PLAY_TOP, W, PLAY_BOTTOM - PLAY_TOP);
+  }
+
+  // 走査線ノイズ（ボス降臨中／重ピンチ）
+  if (bossAlive || danger > 0.7) {
+    ctx.strokeStyle = `rgba(255,80,80,${0.10 + pulse * 0.10})`;
+    ctx.lineWidth = 1;
+    for (let yy = PLAY_TOP + ((tt * 60) | 0) % 4; yy < PLAY_BOTTOM; yy += 4) {
+      ctx.beginPath(); ctx.moveTo(0, yy + 0.5); ctx.lineTo(W, yy + 0.5); ctx.stroke();
+    }
+  }
+
+  // ボス警告テロップ
+  if (bossAlive) {
+    ctx.font = `800 12px "Yu Gothic UI", Meiryo, sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,0.95)";
+    const wlabel = "⚠ 汚染の主 接近中 ⚠";
+    ctx.strokeText(wlabel, W/2, PLAY_TOP + 4);
+    ctx.fillStyle = `rgba(255, ${60 + pulse*60}, 30, ${0.65 + pulse * 0.35})`;
+    ctx.fillText(wlabel, W/2, PLAY_TOP + 4);
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  }
+}
+
+function drawBossIntro() {
+  if (!game.bossIntroT || game.bossIntroT <= 0) return;
+  const r = game.bossIntroT / Math.max(0.001, game.bossIntroMax || 1);  // 1→0
+  const inP = Math.min(1, (1 - r) * 3);          // 入りは速く
+  const outP = Math.min(1, r * 3);               // 抜けはフェード
+  const a = Math.min(inP, outP);
+  // 黒帯：上下から押し寄せる
+  const bandH = (1 - r) * 38;
+  ctx.fillStyle = `rgba(8,4,4,${0.8 * a})`;
+  ctx.fillRect(0, PLAY_TOP, W, bandH);
+  ctx.fillRect(0, PLAY_BOTTOM - bandH, W, bandH);
+  // 中央のドカン
+  const cx = W / 2, cy = (PLAY_TOP + PLAY_BOTTOM) / 2;
+  // 赤い後光
+  const radius = 30 + (1 - r) * 80;
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+  grad.addColorStop(0, `rgba(220,20,20,${0.55 * a})`);
+  grad.addColorStop(0.6, `rgba(120,10,10,${0.25 * a})`);
+  grad.addColorStop(1, `rgba(0,0,0,0)`);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, PLAY_TOP, W, PLAY_BOTTOM - PLAY_TOP);
+  // メインタイトル
+  ctx.font = `900 22px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = 6;
+  const jitter = (1 - r) * 1.5;
+  const jx = (Math.random() - 0.5) * jitter;
+  const jy = (Math.random() - 0.5) * jitter;
+  const introName = (game.bossIntroName || "汚染の主") + " 降臨";
+  ctx.strokeStyle = `rgba(0,0,0,${a})`;
+  ctx.strokeText(introName, cx + jx, cy - 4 + jy);
+  ctx.fillStyle = `rgba(255,${40 + 30 * (1-r)},${30 + 20 * (1-r)},${a})`;
+  ctx.fillText(introName, cx + jx, cy - 4 + jy);
+  // サブテキスト
+  ctx.font = `700 10px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = `rgba(0,0,0,${a})`;
+  const introHp = game.bossIntroType === "bratboss" ? "240" : game.bossIntroType === "poopking" ? "520" : "360";
+  const sub = `経路：${game.bossIntroPath === 0 ? "上ライン" : "下ライン"} / HP${introHp} / 通過攻撃 ×激重`;
+  ctx.strokeText(sub, cx, cy + 16);
+  ctx.fillStyle = `rgba(255,210,80,${a})`;
+  ctx.fillText(sub, cx, cy + 16);
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+}
+
+function drawBossKill() {
+  if (!game.bossKillT || game.bossKillT <= 0) return;
+  const r = game.bossKillT / Math.max(0.001, game.bossKillMax || 1);
+  const inP = Math.min(1, (1 - r) * 4);
+  const outP = Math.min(1, r * 2.2);
+  const a = Math.min(inP, outP);
+  // 白〜金色フラッシュ
+  ctx.fillStyle = `rgba(255, 248, 200, ${0.45 * a})`;
+  ctx.fillRect(0, PLAY_TOP, W, PLAY_BOTTOM - PLAY_TOP);
+  // 中央に拡大する光輪
+  const cx = W / 2, cy = (PLAY_TOP + PLAY_BOTTOM) / 2;
+  const ringR = 10 + (1 - r) * 130;
+  ctx.strokeStyle = `rgba(255, 230, 120, ${0.85 * a})`;
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(cx, cy, ringR, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = `rgba(255, 255, 255, ${0.6 * a})`;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(cx, cy, ringR + 6, 0, Math.PI * 2); ctx.stroke();
+  // 中央テキスト
+  const scale = 1 + (1 - r) * 0.25;
+  const fs = Math.round(26 * scale);
+  ctx.font = `900 ${fs}px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = `rgba(40, 20, 0, ${a})`;
+  ctx.strokeText("撃破", cx, cy - 4);
+  ctx.fillStyle = `rgba(255, 240, 180, ${a})`;
+  ctx.fillText("撃破", cx, cy - 4);
+  // サブ
+  ctx.font = `800 11px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = `rgba(0,0,0,${a})`;
+  const subKill = `${game.bossKillName || "汚染の主"}、流された。`;
+  ctx.strokeText(subKill, cx, cy + 22);
+  ctx.fillStyle = `rgba(184, 242, 173, ${a})`;
+  ctx.fillText(subKill, cx, cy + 22);
+  // 床に光柱
+  ctx.fillStyle = `rgba(255, 240, 180, ${0.18 * a})`;
+  ctx.fillRect(cx - 30, PLAY_TOP, 60, PLAY_BOTTOM - PLAY_TOP);
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+}
+
+function drawStoryBanner() {
+  if (game.storyT <= 0 || game.mode !== "playing") return;
+  const t = game.storyT, m = game.storyMax;
+  const fadeIn = Math.min(1, (m - t) / 0.4);
+  const fadeOut = Math.min(1, t / 0.6);
+  const alpha = Math.min(fadeIn, fadeOut);
+  if (alpha <= 0) return;
+  const s = game.story || { speaker:"", text:"" };
+  const speaker = s.speaker || "";
+  const text = s.text || "";
+
+  // 細めの帯を画面下端寄りに配置（プレイ視界をなるべく潰さない）
+  const boxX = 6, boxY = PLAY_BOTTOM - 38, boxW = W - 12, boxH = 32;
+  // 背景は薄い帯のみ（ほぼ透過）。文字側の輪郭で可読性を担保。
+  const grad = ctx.createLinearGradient(0, boxY, 0, boxY + boxH);
+  grad.addColorStop(0, `rgba(8,12,18,${alpha * 0.10})`);
+  grad.addColorStop(0.5, `rgba(8,12,18,${alpha * 0.34})`);
+  grad.addColorStop(1, `rgba(8,12,18,${alpha * 0.10})`);
+  ctx.fillStyle = grad;
+  ctx.fillRect(boxX, boxY, boxW, boxH);
+  // 上下の細い金線だけ残す
+  ctx.strokeStyle = `rgba(255,216,107,${alpha * 0.65})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(boxX, boxY + 0.5); ctx.lineTo(boxX + boxW, boxY + 0.5);
+  ctx.moveTo(boxX, boxY + boxH - 0.5); ctx.lineTo(boxX + boxW, boxY + boxH - 0.5);
+  ctx.stroke();
+
+  // スピーカー名タグ（背景は塗って可読性）
+  if (speaker) {
+    ctx.font = `700 9px "Yu Gothic UI", Meiryo, sans-serif`;
+    const tagW = Math.ceil(ctx.measureText(speaker).width) + 12;
+    ctx.fillStyle = `rgba(80,38,18,${alpha * 0.95})`;
+    ctx.fillRect(boxX + 4, boxY - 7, tagW, 12);
+    ctx.strokeStyle = `rgba(255,216,107,${alpha})`;
+    ctx.strokeRect(boxX + 4.5, boxY - 6.5, tagW - 1, 11);
+    ctx.fillStyle = `rgba(255,216,107,${alpha})`;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillText(speaker, boxX + 10, boxY - 1);
+  }
+
+  // 本文（2行折り返し・強い輪郭で透過背景でも読める）
+  const lines = wrapJP(text, 28);
+  ctx.font = `800 11px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  for (let i = 0; i < Math.min(2, lines.length); i++) {
+    const ly = boxY + 10 + i * 13;
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = `rgba(0,0,0,${Math.min(1, alpha * 1.1)})`;
+    ctx.strokeText(lines[i], boxX + 8, ly);
+    ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+    ctx.fillText(lines[i], boxX + 8, ly);
+  }
+
+  // ▼進行マーカー
+  const blink = (Math.sin(performance.now() / 200) + 1) / 2;
+  ctx.fillStyle = `rgba(184,242,173,${alpha * (0.4 + blink * 0.6)})`;
+  ctx.font = `700 9px "Yu Gothic UI", Meiryo, sans-serif`;
+  ctx.textAlign = "right";
+  ctx.fillText("▼", boxX + boxW - 6, boxY + boxH - 5);
+  ctx.textAlign = "left";
+}
+function wrapJP(s, n) {
+  const out = [];
+  let cur = "";
+  for (const ch of s) {
+    cur += ch;
+    if (cur.length >= n || "、。！？」".includes(ch)) {
+      out.push(cur); cur = "";
+      if (out.length >= 2) break;
+    }
+  }
+  if (cur && out.length < 2) out.push(cur);
+  return out;
+}
+
+function drawTitleOverlay() {
+  // 完全不透明な背景：state_0(ピカピカ)があればそれをうっすら、無ければ単色。HUD/プレイ画面は描画しない。
+  ctx.fillStyle = "#070a10";
+  ctx.fillRect(0, 0, W, H);
+  if (BG_STATES[0] && BG_STATES[0].complete && BG_STATES[0].naturalWidth > 0) {
+    ctx.globalAlpha = 0.32;
+    ctx.drawImage(BG_STATES[0], 0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(0, 0, W, H);
+
+  centerText("トイレ防衛隊", 18, "#ffffff", 18);
+  centerText("清潔圏崩壊", 32, "#ffd86b", 11);
+  centerText(STORY.title_sub1, 48, "#cfd6df", 8);
+  centerText(STORY.title_sub2, 60, "#cfd6df", 8);
+
+  // ─── 塔の役割カード（2×2）──────────────────
+  const cards = [
+    { key:"toilet",  role:"単体攻撃",     desc:"水しぶき・威力強め" },
+    { key:"sink",    role:"範囲減速",     desc:"近くの敵を半分の速さに" },
+    { key:"paper",   role:"敵を縛る",     desc:"範囲内の敵をその場で停止" },
+    { key:"plunger", role:"近距・押戻",   desc:"近づく敵を押し戻す" },
+  ];
+  const gx = 6, gy = 76, cw = 154, ch = 40, gap = 4;
+  for (let i = 0; i < 4; i++) {
+    const col = i % 2, row = (i / 2) | 0;
+    const x = gx + col * (cw + gap);
+    const y = gy + row * (ch + gap);
+    // 枠
+    ctx.fillStyle = "rgba(18,24,34,0.94)";
+    ctx.fillRect(x, y, cw, ch);
+    ctx.strokeStyle = "rgba(255,216,107,0.85)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, cw - 1, ch - 1);
+    // ホットキー番号
+    ctx.fillStyle = "rgba(255,216,107,1)";
+    ctx.font = `800 8px "Yu Gothic UI", Meiryo, sans-serif`;
+    ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.fillText(`${i + 1}`, x + 3, y + 3);
+    // スプライト（左寄り、底揃え）
+    drawSpriteFrame(cards[i].key, 0, x + 18, y + ch - 3, 1.05);
+    // 名前 + コスト
+    const def = TOWER_DEFS[cards[i].key];
+    ctx.font = `800 10px "Yu Gothic UI", Meiryo, sans-serif`;
+    ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.lineWidth = 3; ctx.strokeStyle = "#0c0e12";
+    // 名前のみ太字で表示。コストはコインピクト＋数字（英字なし）
+    ctx.strokeText(def.name, x + 36, y + 4);
+    ctx.fillStyle = "#ffd86b";
+    ctx.fillText(def.name, x + 36, y + 4);
+    const nameW = Math.ceil(ctx.measureText(def.name).width);
+    kt(x + 36 + nameW + 12, y + 9);
+    ctx.font = `800 10px "Yu Gothic UI", Meiryo, sans-serif`;
+    ctx.lineWidth = 3; ctx.strokeStyle = "#0c0e12";
+    ctx.strokeText(`${def.cost}`, x + 36 + nameW + 20, y + 4);
+    ctx.fillStyle = "#ffd86b";
+    ctx.fillText(`${def.cost}`, x + 36 + nameW + 20, y + 4);
+    // 役割
+    ctx.font = `700 9px "Yu Gothic UI", Meiryo, sans-serif`;
+    ctx.lineWidth = 2; ctx.strokeStyle = "#0c0e12";
+    ctx.strokeText(cards[i].role, x + 36, y + 17);
+    ctx.fillStyle = "#b8f2ad";
+    ctx.fillText(cards[i].role, x + 36, y + 17);
+    // 詳細スペック
+    ctx.font = `600 8px "Yu Gothic UI", Meiryo, sans-serif`;
+    ctx.lineWidth = 2; ctx.strokeStyle = "#0c0e12";
+    ctx.strokeText(cards[i].desc, x + 36, y + 28);
+    ctx.fillStyle = "#cfd6df";
+    ctx.fillText(cards[i].desc, x + 36, y + 28);
+  }
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+
+  // 操作説明（カードの下に余白を取り、英字を排除）
+  centerText("床マスをクリックで設置／１〜４でタワー切替", 174, "#dde3ec", 9);
+  centerText("塔をクリック→空きマスへ移動（約２秒停止）", 187, "#9aa3ad", 8);
+  centerText("取消はエスケープ／やり直しはＲキー", 198, "#9aa3ad", 8);
+
+  // 点滅する着任テキスト
+  const blink = (Math.sin(performance.now() / 380) + 1) / 2;
+  centerText(STORY.title_cta, 218, `rgba(255, 215, 100, ${0.4 + blink * 0.6})`, 12);
+  if (SPRITE_LOAD_FAILED_REASON) {
+    centerText(SPRITE_LOAD_FAILED_REASON, H - 4, "#ff9d6b", 8);
+  }
+}
+
+// drawEndOverlay は廃止（kamishibai_end が紙芝居エンディングを担当）
+
+// ---------- メインループ ----------
+let lastT = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+function drawLoadingScreen() {
+  ctx.fillStyle = "#0c0e12";
+  ctx.fillRect(0, 0, W, H);
+  centerText("読み込み中…", H/2 - 6, "#ffd86b", 14);
+  centerText("（グラフィックを準備）", H/2 + 14, "#bbb", 10);
+}
+
+(async function boot() {
+  try {
+    drawLoadingScreen();
+    // 描画反映を1tick待つ。rAFはheadlessで発火しないことがあるので setTimeout に
+    await new Promise(r => setTimeout(r, 16));
+    // 3秒タイムアウト：何があってもタイトルへ抜ける（読み込み画面で固まらない）
+    await Promise.race([
+      loadAllSprites(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("load timeout 3s")), 3000)),
+    ]).catch(e => {
+      console.warn("[boot] asset load issue:", e && e.message);
+      SPRITE_LOAD_FAILED_REASON = SPRITE_LOAD_FAILED_REASON || ("読み込み一部失敗: " + (e && e.message || e));
+    });
+  } catch (e) {
+    console.error("[boot] fatal:", e);
+    SPRITE_LOAD_FAILED_REASON = "起動エラー: " + (e && e.message || e);
+  }
+  newGame();
+  lastT = performance.now();
+  requestAnimationFrame(loop);
+})();
+    </script>
+  </body>
+</html>
