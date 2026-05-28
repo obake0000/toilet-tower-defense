@@ -10,6 +10,11 @@
 <meta name="author" content="obake0000">
 <link rel="canonical" href="https://obake0000.github.io/toilet-tower-defense/">
 
+<!-- PWA manifest + theme color (for TWA / Bubblewrap APK) -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0a0612">
+<link rel="apple-touch-icon" href="icon-192.png">
+
 <!-- OGP -->
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="obake0000 games">
@@ -62,6 +67,40 @@
     'game_slug': 'toilet-tower-defense'
   });
 </script>
+<!-- Touch → Mouse polyfill for Android APK (Bubblewrap TWA) -->
+<script>
+(function(){
+  function fireMouse(canvas, type, t) {
+    const r = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / r.width;
+    const scaleY = canvas.height / r.height;
+    const ev = new MouseEvent(type, {
+      bubbles: true, cancelable: true,
+      clientX: t.clientX, clientY: t.clientY,
+      button: 0, buttons: type === 'mouseup' ? 0 : 1
+    });
+    canvas.dispatchEvent(ev);
+  }
+  document.addEventListener('DOMContentLoaded', function(){
+    const c = document.getElementById('game');
+    if (!c) return;
+    c.addEventListener('touchstart', function(e){
+      if (e.touches.length) fireMouse(c, 'mousedown', e.touches[0]);
+      e.preventDefault();
+    }, {passive: false});
+    c.addEventListener('touchend', function(e){
+      const t = e.changedTouches[0] || {clientX: 0, clientY: 0};
+      fireMouse(c, 'mouseup', t);
+      fireMouse(c, 'click', t);
+      e.preventDefault();
+    }, {passive: false});
+    c.addEventListener('touchmove', function(e){
+      if (e.touches.length) fireMouse(c, 'mousemove', e.touches[0]);
+      e.preventDefault();
+    }, {passive: false});
+  });
+})();
+</script>
 <!-- SEO_BLOCK_END -->
 <style>
       :root { color-scheme: dark; }
@@ -92,6 +131,10 @@
   <body>
     <div id="wrap">
       <canvas id="game" width="960" height="720"></canvas>
+      <video id="openingVideo" src="assets/opening.mp4" preload="auto" playsinline muted
+        style="position:absolute; left:0; top:0; width:960px; height:720px; background:#000; display:none; cursor:pointer; object-fit:cover;"></video>
+      <button id="skipOpening" type="button"
+        style="position:absolute; right:12px; top:12px; padding:6px 14px; font-size:14px; background:rgba(0,0,0,0.6); color:#ffd864; border:1px solid #ffd864; border-radius:4px; cursor:pointer; display:none; font-family:inherit;">スキップ ▶▶</button>
     </div>
     <div id="hint">
       床マスをクリックで設置 / 設置済みの塔をクリック→空きマスをクリックで<b>移動</b> /
@@ -227,7 +270,7 @@ const ENEMY_DEFS = {
   bratboss: { name:"ガキ大将",     hp: 720, speed: 28, contam: 18, reward: 70, color:"#4a3618", size: 11,
               towerDmg: 5, auraR: 30, auraDps: 2.0, knockResist: 0.05,
               shootRange: 60, shootCd: 2.4, shootDmg: 4, shootColor:"#7c5526", boss: true },
-  poopking: { name:"ウンチの王",   hp: 1520, speed: 11, contam: 60, reward: 110, color:"#3a1f10", size: 14,
+  poopking: { name:"ウンチの王",   hp: 1520, speed: 22, contam: 60, reward: 110, color:"#3a1f10", size: 14,
               towerDmg: 7, auraR: 46, auraDps: 3.0, knockResist: 0.12,
               shootRange: 84, shootCd: 3.0, shootDmg: 6, shootColor:"#3a1f10", boss: true },
 };
@@ -413,8 +456,8 @@ function drawSpriteFrame(type, frame, dx, dy, scale = 1) {
 // ---------- ストーリーテキスト ----------
 const STORY = {
   title_main: "便所最後の45秒×2",
-  title_sub1: "前任清掃員：逃亡 / 後任：あなた",
-  title_sub2: "保健所査察まであと90秒",
+  title_sub1: "前任：床になった / 後任：あなた",
+  title_sub2: "保健所査察まで90秒。逃げ場は内側からロック済み。",
   title_cta:  "クリックで着任",
 };
 
@@ -423,228 +466,189 @@ const STORY = {
 const SEQ_OPENING = [];
 
 // ───────── 物語：プレイ中の小バナー ─────────
+// 短く、乾いた黒ジョーク。1行で読ませる。
 const STORY_LINES = {
-  // 敵初出
-  enemy_roach:    { speaker:"新人",     text:"ゴキブリ。一匹目を見た瞬間、二匹目以降は概念として既に居ます。" },
-  enemy_poop:     { speaker:"清掃班長", text:"『誰かが流すだろう』を全員でやった結果、床に堆積した実績だ。" },
-  enemy_child:    { speaker:"新人",     text:"手を洗わぬ子。実は大人の縮尺モデル。教育では直りません。" },
-  // 戦況の小バナー
-  stage1_warn:    { speaker:"清掃班長", text:"床が茶色くなったらペーパーだ。『あとで拭く』の『あと』は、来ない。" },
-  stage2_warn:    { speaker:"新人",     text:"汚染、広がってます。空気と私の自尊心が、同時に負けてます。" },
-  stage3_warn:    { speaker:"清掃班長", text:"よくここまで来た。──ここからは、お前の番だ。" },
-  diary_1:        { speaker:"前任の日記", text:"『04/12 床が呼ぶ。私は応じてしまう。私は治る側じゃない。』" },
-  diary_2:        { speaker:"前任の日記", text:"『06/03 床の柄を思い出せない。それでも来週、ここに来る。』" },
-  diary_3:        { speaker:"前任の日記", text:"『09/22 もし後任が来たら──私を責めるなと、書いておく。』" },
+  enemy_roach:    { speaker:"新人",       text:"ゴキブリ。一匹見たら、もう千匹です。" },
+  enemy_poop:     { speaker:"清掃班長",   text:"『誰かが流すだろう』の全員一致だ。" },
+  enemy_child:    { speaker:"新人",       text:"手を洗わぬ子。大人の縮尺モデル。" },
+  stage1_warn:    { speaker:"清掃班長",   text:"床が茶色い。『あとで』は来ない。" },
+  stage2_warn:    { speaker:"新人",       text:"汚染も自尊心も、同時に負けてます。" },
+  stage3_warn:    { speaker:"清掃班長",   text:"よくここまで来た。あとはお前の番だ。" },
+  diary_1:        { speaker:"前任の日記", text:"『04/12 床が呼ぶ。応じてしまう。』" },
+  diary_2:        { speaker:"前任の日記", text:"『06/03 床の柄を、思い出せない。』" },
+  diary_3:        { speaker:"前任の日記", text:"『09/22 後任が来たら、私を責めるな。』" },
 };
 
 // ───────── 会話シーケンス（pause-dialogue：ゲーム停止）─────────
-// 統一トーン：淡々／乾いた黒ジョーク／便所＝最後の文明の最前線
-// 文量2倍：各セリフを長文化＋追加カットで物語を厚く
+// 全面改訂：短いセリフ＋乾いた黒ジョーク重視。便所＝人類最後の文明拠点。
 const DIALOG = {
-  // ─── Act 1：習慣は午前9時に死ぬ ───
+  // ─── Act 1：着任、3秒で人類の責任 ───
   stage1_intro: [
-    { who:"clean",  text:"今日は、ゴキブリと、走る子供と、見えない埃が来る。三大害だ。" },
-    { who:"rookie", text:"……走る子供って、何の脅威ですか？ ただ走ってるだけでは。" },
-    { who:"clean",  text:"走るからだ。便所では、走るやつが、一番怖い。" },
-    { who:"clean",  text:"走った床は滑る。滑った床は、誰かの腰を持っていく。腰は便所の通貨だ。" },
-    { who:"rookie", text:"通貨、ですか。" },
-    { who:"clean",  text:"流通してる。冗談じゃなく。──持ち場へ。便器を据えろ。便所では、据える方が早い。" },
+    { who:"clean",  text:"新人。お前が今日からの後任だ。" },
+    { who:"rookie", text:"前任の方は？" },
+    { who:"clean",  text:"床になった。" },
+    { who:"rookie", text:"……え。" },
+    { who:"clean",  text:"深く聞くな。聞いた奴から、辞める。" },
+    { who:"rookie", text:"私も辞退して──" },
+    { who:"clean",  text:"扉、もう内側からロックした。" },
   ],
   stage1_path: [
-    { who:"clean",  text:"パイプが、鳴いたな。聞こえるか、新任。" },
-    { who:"rookie", text:"……鳴く配管なんて、聞いたことありません。生き物じゃないんですから。" },
-    { who:"clean",  text:"どんな配管も、限界が来れば歌う。20年前から、決まってる。" },
-    { who:"clean",  text:"歌った配管の下では、床が割れる。割れた床の下から、奴らは来る。" },
-    { who:"rookie", text:"奴ら、って、ゴキブリですか。汚物ですか。" },
-    { who:"clean",  text:"両方だ。あと、走る子供。──通路が変わる。塔を、据え直せ。手は急げ。" },
+    { who:"rookie", text:"通路が、勝手に変わりました。" },
+    { who:"clean",  text:"便所は生きてる。深く考えるな。" },
+    { who:"rookie", text:"考えなければ大丈夫、と。" },
+    { who:"clean",  text:"考えた奴から消える。便所のルールだ。" },
   ],
   stage1_boss_pre: [
-    { who:"clean",  text:"足音だ。──ガキ大将。" },
-    { who:"rookie", text:"小学生ですか？ 警察に通報しません？" },
-    { who:"clean",  text:"通報されたガキは、たいてい、便所に戻ってくる。だから家じゃなく便所に来る。" },
-    { who:"clean",  text:"便所を遊び場と勘違いした、未来の大人だ。" },
-    { who:"clean",  text:"倒すんじゃない。帰すんだ。家がある側へ、教えるように、押し戻せ。" },
+    { who:"clean",  text:"ガキだ。" },
+    { who:"rookie", text:"……ただの子供では？" },
+    { who:"clean",  text:"便所で走るガキは、いずれ便所で死ぬ大人になる。" },
+    { who:"clean",  text:"今のうちに、家へ帰せ。" },
   ],
   stage1_boss_in: [
-    { who:"brat",   text:"オレが大将だぞー！ 便所はオレのもんだー！", emo:0 },
-    { who:"brat",   text:"床に水まいてー！ 紙ぐっちゃぐちゃー！ 誰も入ってこねぇー！", emo:1 },
-    { who:"brat",   text:"オレの城ー！ オレの王国ー！", emo:0 },
-    { who:"clean",  text:"立て看板、読めるか、坊主。『落書き禁止』。読めなくても、書ける、らしいな。" },
-    { who:"rookie", text:"……ヤンキーじゃなくて、本当に小学生ですよね。" },
-    { who:"clean",  text:"両方だ。便所では、両方ありえる。" },
+    { who:"brat",   text:"便所はオレの城ー！", emo:0 },
+    { who:"brat",   text:"床に水ー！ 紙ぐっちゃー！", emo:1 },
+    { who:"rookie", text:"親、何してるんですか。" },
+    { who:"clean",  text:"親もここ出身だ。" },
   ],
   stage1_boss_kill: [
-    { who:"brat",   text:"うっ……うわぁぁぁ……。", emo:2 },
-    { who:"rookie", text:"……泣いてます。びっくりするくらい、泣いてます。" },
-    { who:"clean",  text:"泣いてる時だけ、人間に戻る。覚えとけ、新任。" },
-    { who:"clean",  text:"明日、家のポストに『便所では走るな』と書いた紙が届く。" },
-    { who:"clean",  text:"親が読む。子は読まない。それで、たいてい、3年は来ない。" },
-    { who:"rookie", text:"……便所、子供にとって、結構な人生イベントなんですね。" },
+    { who:"brat",   text:"うえぇぇぇん……", emo:2 },
+    { who:"rookie", text:"……泣いてます。" },
+    { who:"clean",  text:"泣いてる間だけ、人間だ。" },
+    { who:"clean",  text:"明日また来るぞ。覚悟しとけ。" },
   ],
 
-  // ─── Act 2：流せなかった者の、王 ───
+  // ─── Act 2：20年前、流せなかった王 ───
   stage2_intro: [
-    { who:"clean",  text:"第二波だ。──ここから、私の昔話が、少し混じる。" },
-    { who:"rookie", text:"昔話、ですか。今、ですか？" },
-    { who:"clean",  text:"今しかない。第二波の朝に語らなかった話は、たいてい、永遠に語らない。" },
-    { who:"clean",  text:"私も、この職場で、新任の朝を経験した。20年前のことだ。" },
-    { who:"clean",  text:"前任が、私を逃がして、消えた。床に、紙が一枚、残されていた。" },
-    { who:"rookie", text:"……何て書いてあったんですか。" },
-    { who:"clean",  text:"『悪いな。お前なら、20年は持つ』。当たってた。腹立つことに。" },
-    { who:"clean",  text:"床は、減らない。守る人だけは、いつも、いる。それだけだ。" },
+    { who:"clean",  text:"少し、昔話する。" },
+    { who:"rookie", text:"今ですか。" },
+    { who:"clean",  text:"今しかない。明日のお前は、たぶん、いない。" },
+    { who:"clean",  text:"20年前、俺もここで前任に逃がされた。" },
+    { who:"rookie", text:"前任、その後どうなったんですか。" },
+    { who:"clean",  text:"床になった。" },
+    { who:"rookie", text:"……みんな床になるんですか、この便所。" },
+    { who:"clean",  text:"床は、減らない。守る人だけが、減る。" },
   ],
   stage2_path: [
-    { who:"rookie", text:"瓦礫が、転がってきました！ 配管、たぶん、奥の壁、抜けてます。" },
-    { who:"clean",  text:"そう来るか。20年経っても、瓦礫の落ち方は、変わらないな。" },
-    { who:"clean",  text:"私の新任の朝も、同じ位置で、同じ落ち方をした。便所の癖、というやつだ。" },
-    { who:"clean",  text:"新しい通路を踏むのは、お前が初代だ。──ように見えて、二代目だ。" },
-    { who:"rookie", text:"……名誉、なんですかね、これ。" },
-    { who:"clean",  text:"名誉ではない。ただ、踏み抜かないように、気をつけろ。" },
+    { who:"rookie", text:"床、抜けてます！" },
+    { who:"clean",  text:"落ちるな。下は下水だ。" },
+    { who:"clean",  text:"下水は便所より、治安が悪い。" },
+    { who:"rookie", text:"……階級ってあるんですね、便所にも。" },
   ],
   stage2_boss_pre: [
-    { who:"clean",  text:"あれが、私の最初の朝の、王だ。" },
-    { who:"rookie", text:"王、ですか。便所に。冗談じゃないんですか。" },
-    { who:"clean",  text:"冗談だったら良かった。流れない、流せない、流されざる者の、王。" },
-    { who:"clean",  text:"20年前、私は震えた。前任が逃がしてくれて、私は便器の影で、震え続けた。" },
-    { who:"clean",  text:"翌朝、王は消えていた。前任もだ。日記だけ、ロッカーに残ってた。" },
-    { who:"rookie", text:"……それで、班長は、20年。" },
-    { who:"clean",  text:"そうだ。20年、震え続けてる。──だが、今日は、隣に、お前がいる。" },
+    { who:"clean",  text:"来た。──20年前、俺が流せなかった奴だ。" },
+    { who:"rookie", text:"ウンチ……ですよね、あれ。" },
+    { who:"clean",  text:"「ウンチ様」だ。様をつけろ。" },
+    { who:"clean",  text:"つけて生き延びた奴を、俺は知ってる。" },
+    { who:"rookie", text:"敬語、覚えます。" },
   ],
   stage2_boss_in: [
     { who:"king",   text:"久しいな、清掃の者よ。", emo:0 },
-    { who:"king",   text:"我は、流されざる者の、王。床は、誰の手にも、渡らぬ。", emo:1 },
-    { who:"king",   text:"君らが、20年前に、流せなかった。その記憶は、朕の力となった。", emo:2 },
-    { who:"rookie", text:"……班長を、覚えてるんですね、こいつ。" },
-    { who:"clean",  text:"覚えてる。20年、こちらも、忘れていない。だから、今日、ここにいる。" },
-    { who:"clean",  text:"新任。便所の戦いは、覚えてもらった瞬間、始まる。──覚えとけ。" },
+    { who:"king",   text:"20年、よく生きた。今日が、命日だ。", emo:1 },
+    { who:"rookie", text:"命日、急に決められても、困ります。" },
+    { who:"clean",  text:"便所の上司は、いつも急なんだ。" },
   ],
   stage2_boss_kill: [
-    { who:"king",   text:"……次は、お前たちの、息子の、代で、また会おう。", emo:3 },
-    { who:"king",   text:"朕は、流されぬ。ただ、忘れられるだけだ。", emo:3 },
-    { who:"clean",  text:"勝った。──お前が、勝った、新任。20年遅れた、私の借りも、返した。" },
-    { who:"rookie", text:"班長と、二人で、勝ちました。一人じゃなかったの、本当によかった。" },
-    { who:"clean",  text:"二人だ。──ありがとうな。20年、生きててよかった。" },
+    { who:"king",   text:"……次は、お前の息子の代で会おう。", emo:3 },
+    { who:"rookie", text:"結婚すら、してません。" },
+    { who:"clean",  text:"結婚の話を、便所のボスから聞くな。" },
+    { who:"rookie", text:"はい。" },
   ],
 
   // ─── Act 3：引退の朝、最後の主 ───
   stage3_intro: [
-    { who:"clean",  text:"今日、私は引退する。──書類は、もう、出してある。" },
-    { who:"rookie", text:"えっ、突然──昨日まで、何も言ってませんでしたよね。" },
-    { who:"clean",  text:"突然じゃない。20年、引退しようと思いながら、20年経った。" },
-    { who:"clean",  text:"言わなかったのは、言うと、ロッカーで噂になるからだ。便所の噂は、配管より早い。" },
-    { who:"rookie", text:"……配管より、早い。" },
-    { who:"clean",  text:"次の新任が来る前に、お前ひとりで守れる便所に、しておきたい。" },
-    { who:"clean",  text:"だから今日は、私は、後ろから見てる。前に出ない。──怖いか。" },
-    { who:"rookie", text:"……怖いです。とても。" },
-    { who:"clean",  text:"良い。怖くない奴は、3年で、もういない。怖さは、続けるための、燃料だ。" },
+    { who:"clean",  text:"今日で、俺は辞める。" },
+    { who:"rookie", text:"急ですね。" },
+    { who:"clean",  text:"20年、急に辞めようとしてた。今日、急に成功した。" },
+    { who:"rookie", text:"成功するんですか、辞めるのって。" },
+    { who:"clean",  text:"成功率3割だ。便所では、悪くない数字だ。" },
   ],
   stage3_path: [
-    { who:"clean",  text:"床下が、抜けたな。20年で、初めて見る形だ。──新しい便所だ。" },
-    { who:"clean",  text:"よく見ろ。──次の新任に、教える為に、見るんだ。" },
-    { who:"clean",  text:"お前が、教える側になる日が来る。それは、たぶん、想像より早い。" },
-    { who:"rookie", text:"班長。ここから先は、私、ひとりで戦います。" },
-    { who:"rookie", text:"班長は、ロッカーで、座っていてください。──今日まで、本当に、ありがとうございました。" },
-    { who:"clean",  text:"ああ。ロッカーの奥に、私の日記がある。読まなくていい。" },
-    { who:"clean",  text:"辞めたくなったら、開け。──開けたら、たぶん、辞めたくなくなる。理屈は、書いてない。" },
+    { who:"clean",  text:"床の抜け方、見たか。" },
+    { who:"rookie", text:"はい。形が、悪いです。" },
+    { who:"clean",  text:"便所の床は、辞表だ。" },
+    { who:"clean",  text:"抜けるたびに、誰かが辞めるしるしだ。" },
   ],
   stage3_boss_pre: [
-    { who:"rookie", text:"……音が、ありません。班長、これは──" },
-    { who:"clean",  text:"アレが来る前の、静寂だ。耳の奥が、痛くなる、あの静けさだ。" },
-    { who:"clean",  text:"汚染の主。フタを閉めぬ文化、全部の、集合体。" },
-    { who:"clean",  text:"20年、私は、こいつの存在を、信じないことにしてた。──信じてたら、辞めてた。" },
-    { who:"clean",  text:"私はここで降りる。お前ひとりで、会え。新任。──いや、班長。" },
-    { who:"rookie", text:"班長、今日まで、ありがとうございました。本当に、本当に。" },
-    { who:"clean",  text:"礼を言う相手は、私じゃない。お前の、前任だ。──私のな。" },
+    { who:"clean",  text:"汚染の主だ。" },
+    { who:"rookie", text:"勝てますか。" },
+    { who:"clean",  text:"勝ったことはない。負けたことは、ある。" },
+    { who:"clean",  text:"今日は、お前の番だ。──俺はロッカーで茶を淹れて待つ。" },
   ],
   stage3_boss_in: [
-    { who:"filth",  text:"我は、フタを閉めぬ文化の、集合体である。", emo:0 },
-    { who:"filth",  text:"君らが、流せなかった全てが、ここに、集まった。", emo:1 },
-    { who:"filth",  text:"見て見ぬふりした、紙くず。後で拭くと言った、足跡。流したつもりの、罪。", emo:1 },
-    { who:"filth",  text:"全て、朕の血肉である。──床は、私の、ものだ。", emo:2 },
-    { who:"rookie", text:"渡しません。私は、清掃員、です。" },
-    { who:"rookie", text:"見て見ぬふりした人たちの代わりに、今日、私が、あなたを、流します。" },
+    { who:"filth",  text:"我は、フタを閉めぬ文化の、集合体。", emo:0 },
+    { who:"filth",  text:"君らが流さなかった全てが、我となった。", emo:1 },
+    { who:"rookie", text:"便所の文句は、便所で言ってください。" },
+    { who:"filth",  text:"ここは便所だ。", emo:2 },
+    { who:"rookie", text:"……ですね。" },
   ],
   stage3_boss_kill: [
-    { who:"filth",  text:"……我を、流すか、新任よ。", emo:3 },
-    { who:"filth",  text:"流された者は、誰かに、覚えていてもらえる。朕は、忘れられたまま、流れる。", emo:3 },
-    { who:"rookie", text:"覚えてます。私が、覚えてます。だから、流れて、ください。" },
-    { who:"rookie", text:"誰かが、流さないと、いけないので。──それが、私の、仕事です。" },
-    { who:"clean",  text:"（お疲れさん、新任。──いや、もう、班長、だな。）" },
-    { who:"clean",  text:"（私は、ロッカーで、お茶を淹れて、待ってる。）" },
+    { who:"filth",  text:"……流された。", emo:3 },
+    { who:"filth",  text:"誰にも、覚えてもらえぬまま。", emo:3 },
+    { who:"rookie", text:"覚えません。仕事ですから。" },
+    { who:"clean",  text:"（よく言った、新任。──いや、班長。）" },
   ],
 
   // ─── 勝敗 ───
   win: [
-    { who:"rookie",    text:"……査察、終わりました。班長、保健所、帰ります。" },
-    { who:"inspector", text:"床、ぎりぎり原型を、保っています。再来週、また、伺います。" },
-    { who:"inspector", text:"今日のチェックは、一つで済みました。継続を、お願いします。" },
-    { who:"rookie",    text:"再来週も、来ます。──来週も、来ます。毎週、来ます。" },
-    { who:"rookie",    text:"（班長は、もういない。ロッカーには、お茶のセットと、日記が、置いてある。）" },
-    { who:"rookie",    text:"（読まないって、決めた。読んだら、辞めたくなりそうだから。）" },
-    { who:"rookie",    text:"（でも、いつか、辞めたくなったら、その時に、開ける。）" },
-    { who:"rookie",    text:"（その時まで、私は、ここに、いる。）" },
+    { who:"rookie",    text:"査察、終わりました。" },
+    { who:"inspector", text:"床、ぎりぎり原型を保っています。" },
+    { who:"inspector", text:"再来週、また伺います。" },
+    { who:"rookie",    text:"来週も来ます。毎週、来ます。" },
+    { who:"rookie",    text:"（班長は、もういない。お茶セットだけ残っている。）" },
+    { who:"rookie",    text:"（日記、読まないと決めた。読んだら辞めたくなる。）" },
   ],
   lose_hp: [
-    { who:"clean",  text:"便所の清潔度が、ゼロになった。ここまでだ。──ここまでだな、新任。" },
-    { who:"rookie", text:"明日、来ます。今日のは、慣らしです。明日、もう一度、最初から、やります。" },
-    { who:"clean",  text:"来なくていい。──逃げろ。便所で唯一、許された、選択だ。" },
-    { who:"clean",  text:"前任もそうした。前任の前任も、そうした。誰も責めない。便所は、責める場所じゃない。" },
-    { who:"rookie", text:"でも、誰かが、来ないと。来ないと、街の、トイレが、ゼロになります。" },
-    { who:"clean",  text:"……だから、3年で、誰もが消えるんだ。お前も、消えていい。許されてる。" },
-    { who:"clean",  text:"消えたあと、また、戻ってきても、いい。便所は、扉を閉めない場所だ。" },
+    { who:"clean",  text:"清潔度ゼロ。──ここまでだ。" },
+    { who:"rookie", text:"明日また来ます。" },
+    { who:"clean",  text:"来るな。前任も同じことを言って、20年来てない。" },
+    { who:"rookie", text:"……あ、はい。" },
+    { who:"clean",  text:"逃げろ。便所で唯一、許された選択だ。" },
   ],
   lose_contam: [
-    { who:"inspector", text:"床が、原型を失いました。閉鎖、措置です。──申し訳ない。" },
-    { who:"rookie",    text:"……すみません。本当に、すみません。" },
-    { who:"clean",     text:"謝るな。20年やった私の代でも、何度も、閉まった。閉まらない便所は、ない。" },
-    { who:"clean",     text:"閉まる便所は、たいてい、また開く。──別の、誰かの、手で。" },
-    { who:"clean",     text:"我々の仕事は、開け続けることじゃない。次の誰かに、開け方を、残すことだ。" },
-    { who:"rookie",    text:"……日記、書きます。書いておきます。次の人のために。" },
+    { who:"inspector", text:"床が、原型を失いました。閉鎖です。" },
+    { who:"rookie",    text:"……すみません。" },
+    { who:"clean",     text:"謝るな。閉まらない便所はない。" },
+    { who:"clean",     text:"閉まる便所は、また誰かが、開ける。" },
+    { who:"rookie",    text:"……次の人、来ますかね。" },
+    { who:"clean",     text:"来る。便所には、必ず、誰かが来る。" },
   ],
 };
 
 // ───────── プロローグ（紙芝居：背景画像＋テロップ） ─────────
 // bg: 0=ピカピカ / 1=普通 / 2=汚 / 3=崩壊
-// 統一トーン：淡々とした絶望×乾いた黒ジョーク。便所＝最後の文明拠点
+// 全面改訂：短く、乾いた黒ジョーク。1〜2行で読ませる。
 const PROLOGUE_SCENES = [
-  { kind:"narr", bg:3, filter:"sepia", dur:4.2,
+  { kind:"narr", bg:3, filter:"sepia", dur:3.4,
     head:"西暦 20XX 年。",
     body:["ヒトは、トイレを失った。"] },
-  { kind:"narr", bg:3, filter:"dim", dur:4.4,
-    body:["理由は──まあ、察してくれ。",
-          "誰も、覚えていないことに、している。"] },
-  { kind:"narr", bg:2, filter:"none", dur:4.6,
-    body:["街のトイレが順に閉まり、最後に残ったのが、ここだ。",
-          "第七公衆便所。通称──"] },
-  { kind:"title", bg:0, filter:"glow", dur:4.0,
+  { kind:"narr", bg:3, filter:"dim", dur:3.4,
+    body:["原因は、たぶん、フタを閉めなかったから。"] },
+  { kind:"narr", bg:2, filter:"none", dur:3.6,
+    body:["街に残った最後のトイレ──第七公衆便所。",
+          "通称──"] },
+  { kind:"title", bg:0, filter:"glow", dur:3.4,
     head:"《 清 潔 圏 》",
     body:["ここ以外、もう、ない。"] },
-  { kind:"memo", bg:2, filter:"none", dur:5.4,
+  { kind:"memo", bg:2, filter:"none", dur:4.4,
     head:"清掃員規程 第三七条",
-    body:["『流すは祈り、確認は信仰、",
-          "  見て見ぬふりは即解雇。』",
-          "──最後の一行は、長らく適用されていない。"] },
-  { kind:"narr", bg:2, filter:"none", dur:4.6,
-    body:["歴代の清掃員は、平均三年で消えた。",
-          "逃亡が一名。失踪が二名。",
-          "残りは、便所と一体化したと、聞く。"] },
-  { kind:"dlg",  bg:2, filter:"none", dur:4.0, speaker:"清掃班長",
-    body:["よく来た、新任。",
-          "面接、隣ビルの飲食じゃなかったか？"] },
-  { kind:"dlg",  bg:2, filter:"none", dur:4.0, speaker:"新人",
-    body:["……履歴書、たぶん、配達ミスです。",
-          "あの、辞退、できますか。"] },
-  { kind:"dlg",  bg:2, filter:"warn", dur:4.6, speaker:"清掃班長",
-    body:["90秒後、保健所が来る。間に合わなきゃ、閉鎖だ。",
-          "閉鎖になれば、街にトイレは、ゼロだ。"] },
-  { kind:"dlg",  bg:2, filter:"warn", dur:4.4, speaker:"新人",
-    body:["……入って3秒で、",
-          "人類の責任ってやつ、背負わされました。"] },
-  { kind:"dlg",  bg:2, filter:"none", dur:4.6, speaker:"清掃班長",
-    body:["便器を据えろ。紙で磨け。スッポンで押し戻せ。",
-          "──武器は、便所にしか、ない。"] },
-  { kind:"narr", bg:3, filter:"warn", dur:3.8,
-    body:["そして、奥の個室から、",
+    body:["『流すは祈り、見て見ぬふりは即解雇』",
+          "──ただし、解雇前に、だいたい自分から辞める。"] },
+  { kind:"narr", bg:2, filter:"none", dur:3.8,
+    body:["歴代の清掃員、平均勤続三年。",
+          "それ以上は、床と一体化する。"] },
+  { kind:"dlg",  bg:2, filter:"none", dur:3.4, speaker:"清掃班長",
+    body:["来たな、新任。",
+          "面接、隣のラーメン屋じゃなかったか？"] },
+  { kind:"dlg",  bg:2, filter:"none", dur:3.4, speaker:"新人",
+    body:["……配達ミスです。辞退、できますか。"] },
+  { kind:"dlg",  bg:2, filter:"warn", dur:3.8, speaker:"清掃班長",
+    body:["90秒で保健所が来る。",
+          "間に合わなきゃ、街のトイレはゼロだ。"] },
+  { kind:"dlg",  bg:2, filter:"warn", dur:3.4, speaker:"新人",
+    body:["……入って3秒で、人類の責任、",
+          "重すぎませんか。"] },
+  { kind:"narr", bg:3, filter:"warn", dur:3.4,
+    body:["奥の個室から、",
           "とんでもない呼吸音が、聞こえる。"] },
   { kind:"cta",  bg:0, filter:"glow", dur:99,
     head:"──汚染を、押し返せ。",
@@ -653,58 +657,57 @@ const PROLOGUE_SCENES = [
 ];
 
 // ───────── エンディング（紙芝居） ─────────
-// 統一トーン：淡々／乾いた皮肉／清掃員の自己肯定なき矜持
+// 全面改訂：短く、乾いた皮肉。1〜2行で読ませる。
 const ENDING_SCENES = {
   win: [
-    { kind:"narr", bg:2, filter:"dim", dur:4.0,
+    { kind:"narr", bg:2, filter:"dim", dur:3.4,
       head:"査察、終了。",
-      body:["保健所職員は、チェックを一つ入れて、何も言わずに帰った。"] },
-    { kind:"dlg",  bg:1, filter:"none", dur:4.4, speaker:"新人",
-      body:["……再来週、また来ます。",
-            "逃げる勇気があったら、今日が最後でした。"] },
-    { kind:"narr", bg:1, filter:"glow", dur:4.6,
+      body:["職員は、チェックを一つ入れて、何も言わず帰った。"] },
+    { kind:"dlg",  bg:1, filter:"none", dur:3.4, speaker:"新人",
+      body:["……来週も来ます。",
+            "逃げる勇気は、もう、ありません。"] },
+    { kind:"narr", bg:1, filter:"glow", dur:3.8,
       head:"清潔圏、維持。",
       body:["床に、元の柄が、見える。",
-            "白だった。──覚えて、いなかった。"] },
-    { kind:"narr", bg:0, filter:"glow", dur:4.4,
+            "白だった。──20年、忘れていた色だ。"] },
+    { kind:"narr", bg:0, filter:"glow", dur:3.6,
       body:["ロッカーの奥に、班長の日記。",
-            "読まないと決めた。読んだら、辞めたくなりそうだから。"] },
+            "読まないと決めた。読んだら、たぶん、辞める。"] },
     { kind:"title",bg:0, filter:"glow", dur:99,
       head:"便所守護神、認定。",
       body:["来週もまた、ここに来る。",
             "クリックでタイトルへ"] },
   ],
   lose_hp: [
-    { kind:"narr", bg:3, filter:"dim", dur:4.0,
+    { kind:"narr", bg:3, filter:"dim", dur:3.4,
       head:"清潔度、ゼロ。",
-      body:["床が、ヒトの想像を超えた。"] },
-    { kind:"dlg",  bg:3, filter:"warn", dur:4.4, speaker:"清掃班長",
-      body:["閉鎖だ。──お前も、明日には、逃げてる。",
-            "前任と、同じ道だ。"] },
-    { kind:"dlg",  bg:3, filter:"dim",  dur:4.4, speaker:"新人",
-      body:["……日記、",
-            "読んでみても、いいですか。"] },
-    { kind:"narr", bg:3, filter:"sepia",dur:4.6,
-      head:"第七公衆便所、本日閉鎖。",
-      body:["街のトイレは、ゼロになった。"] },
+      body:["床が、ヒトの想像を、超えた。"] },
+    { kind:"dlg",  bg:3, filter:"warn", dur:3.6, speaker:"清掃班長",
+      body:["閉鎖だ。──逃げろ。お前は若い。"] },
+    { kind:"dlg",  bg:3, filter:"dim",  dur:3.4, speaker:"新人",
+      body:["明日また来ます。"] },
+    { kind:"dlg",  bg:3, filter:"dim",  dur:3.6, speaker:"清掃班長",
+      body:["来るな。",
+            "前任も同じことを言って、20年来ていない。"] },
     { kind:"title",bg:3, filter:"dim",  dur:99,
       head:"便所、閉鎖。",
       body:["責任者は、逃亡済。",
             "クリックで再挑戦"] },
   ],
   lose_contam: [
-    { kind:"narr", bg:3, filter:"warn", dur:4.0,
+    { kind:"narr", bg:3, filter:"warn", dur:3.4,
       head:"汚染率、上限。",
       body:["床は、原型を、失った。"] },
-    { kind:"dlg",  bg:3, filter:"warn", dur:4.6, speaker:"保健所",
+    { kind:"dlg",  bg:3, filter:"warn", dur:3.6, speaker:"保健所",
       body:["閉鎖、措置です。",
-            "清潔圏は、崩壊しました。"] },
-    { kind:"dlg",  bg:3, filter:"dim",  dur:4.4, speaker:"新人",
-      body:["……前任さんも、",
-            "この音、聞いてたんでしょうね。"] },
-    { kind:"narr", bg:3, filter:"sepia",dur:4.6,
+            "ご苦労様。次のお仕事に、お進みください。"] },
+    { kind:"dlg",  bg:3, filter:"dim",  dur:3.4, speaker:"新人",
+      body:["……次の仕事、",
+            "便所より、楽ですかね。"] },
+    { kind:"narr", bg:3, filter:"sepia",dur:3.6,
       head:"《 清 潔 圏 》崩壊。",
-      body:["20XX 年、最後のトイレが、消えた。"] },
+      body:["最後のトイレが、消えた。",
+            "街は、もう、流せない。"] },
     { kind:"title",bg:3, filter:"dim",  dur:99,
       head:"便所、閉鎖。",
       body:["床は、もう、喋らない。",
@@ -770,6 +773,8 @@ function sfx(name) {
 
 // 音楽：簡易ループパターン。ステージごとに切替
 const MUSIC_PATTERNS = {
+  // オープニング動画用：低速・低音重心・乾いた緊張感（ディストピア黒コメディ）
+  opening:{ tempo: 64,  bass:[65.4, 73.4, 65.4, 87.3],          lead:[261.6, 311.1, 293.7, 246.9], leadType:"sine" },
   title:  { tempo: 80,  bass:[110, 130.8, 110, 146.8],         lead:[329.6, 392, 440, 392], leadType:"triangle" },
   stage1: { tempo: 92,  bass:[130.8, 196, 130.8, 174.6],       lead:[523.25, 659.25, 783.99, 659.25], leadType:"triangle" },
   stage2: { tempo: 108, bass:[110, 138.6, 130.8, 116.5],       lead:[392, 466.16, 523.25, 466.16], leadType:"square" },
@@ -1501,16 +1506,7 @@ function update(dt) {
             color: cleaned > 0 ? "#fff8d8" : "#dadce0",
           });
         }
-        // 「-数字」のテキストポップ（清掃量を数字で見える化）
-        if (cleaned > 0) {
-          game.particles.push({
-            x: t.cx, y: t.cy - 14,
-            vx: 0, vy: -22,
-            life: 0.65, maxLife: 0.65,
-            size: 9, color: "#b8f2ad",
-            text: `−${Math.round(cleaned)}`,
-          });
-        }
+        // 数字ポップは廃止（紙吹雪と cleanFx の白光で十分視認できるため）
       }
     }
   }
@@ -3251,6 +3247,69 @@ function drawLoadingScreen() {
   centerText("（グラフィックを準備）", H/2 + 14, "#bbb", 10);
 }
 
+// オープニング動画：boot 直後に 1 回だけ再生。クリック/ESC/Space/Enter/スキップボタンで飛ばせる
+// BGM は WebAudio で合成（MUSIC_PATTERNS.opening）。autoplay制限で context が suspended のときは
+// 最初のユーザー操作（クリック/キー）で resume → BGM 鳴り始める。
+let _openingSeen = false;
+function tryStartOpeningBgm() {
+  if (!_audioStarted) { initAudio(); _audioStarted = true; }
+  if (audioCtx && audioCtx.state === "suspended") {
+    try { audioCtx.resume(); } catch {}
+  }
+  music_play("opening");
+}
+function playOpeningVideo() {
+  return new Promise((resolve) => {
+    const vid = document.getElementById("openingVideo");
+    const skipBtn = document.getElementById("skipOpening");
+    if (!vid || _openingSeen) { resolve(); return; }
+    _openingSeen = true;
+    let done = false;
+    // BGM起動：suspended のままなら gesture を待つ
+    tryStartOpeningBgm();
+    const gestureResume = () => {
+      if (audioCtx && audioCtx.state === "suspended") {
+        try { audioCtx.resume().then(() => music_play("opening")); } catch {}
+      }
+    };
+    window.addEventListener("pointerdown", gestureResume, { once: true, capture: true });
+    window.addEventListener("keydown",     gestureResume, { once: true, capture: true });
+
+    const finish = () => {
+      if (done) return;
+      done = true;
+      window.removeEventListener("keydown", onKey, true);
+      try { vid.pause(); } catch {}
+      vid.style.display = "none";
+      skipBtn.style.display = "none";
+      music_stop();
+      resolve();
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape" || e.key === " " || e.key === "Enter") {
+        finish(); e.preventDefault();
+      }
+    };
+    vid.addEventListener("ended", finish);
+    vid.addEventListener("error", finish);
+    vid.addEventListener("click", finish);
+    skipBtn.addEventListener("click", finish);
+    window.addEventListener("keydown", onKey, true);
+    vid.style.display = "block";
+    skipBtn.style.display = "block";
+    const p = vid.play();
+    if (p && typeof p.catch === "function") {
+      p.catch(() => {
+        // autoplay blocked → click to start; first click also dismisses
+        const oneClick = () => { finish(); };
+        document.body.addEventListener("click", oneClick, { once: true });
+      });
+    }
+    // セーフティ：14秒で必ず終わる（動画は8秒前後）
+    setTimeout(finish, 14000);
+  });
+}
+
 (async function boot() {
   try {
     drawLoadingScreen();
@@ -3268,6 +3327,8 @@ function drawLoadingScreen() {
     console.error("[boot] fatal:", e);
     SPRITE_LOAD_FAILED_REASON = "起動エラー: " + (e && e.message || e);
   }
+  // アセット読込後にオープニング動画 → 紙芝居プロローグ
+  await playOpeningVideo().catch(() => {});
   newGame();
   lastT = performance.now();
   requestAnimationFrame(loop);

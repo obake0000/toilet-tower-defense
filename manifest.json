@@ -1,0 +1,28 @@
+{
+  "name": "Toilet Tower Defense",
+  "short_name": "Toilet TD",
+  "description": "90秒で保健所査察。清掃員になってトイレを汚染から守るブラウザTD",
+  "lang": "ja",
+  "dir": "ltr",
+  "start_url": "/toilet-tower-defense/",
+  "scope": "/toilet-tower-defense/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#0a0612",
+  "theme_color": "#0a0612",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["games", "entertainment"]
+}
